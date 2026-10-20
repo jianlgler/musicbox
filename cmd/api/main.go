@@ -14,7 +14,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		// Status 200 is the default
 		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
-			log.Printf("[ERROR] %s %s - %v", r.Method, r.URL.Path, err)
+			log.Printf("[WRITE_ERROR] %s %s - %v", r.Method, r.URL.Path, err)
 		}
 	})
 
