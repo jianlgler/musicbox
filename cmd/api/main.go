@@ -40,7 +40,7 @@ func main() {
 	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelMigrate()
 	if err := db.Migrate(migrateCtx, pool); err != nil {
-		log.Fatalf("[MIGRATIONS] migrate: %v", err) // It skips defer
+		log.Fatalf("migrate: %v", err) // It skips defer
 	}
 
 	mux := http.NewServeMux()

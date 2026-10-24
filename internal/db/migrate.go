@@ -52,12 +52,10 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 			applied_at	timestamptz NOT NULL DEFAULT now()
 		)`)
 	if err != nil {
-		return fmt.Errorf("[MIGRATIONS] create schema_migrations; %w", err)
+		return fmt.Errorf("[MIGRATIONS] create schema_migrations: %w", err)
 	}
 
 	/*********************************MIGRATION***********************************/
-
-	// ReadFile returns []byte later Exec will take a String
 	entries, err := fs.ReadDir(migrationsFS, "migrations") // Sorted by filename
 	if err != nil {
 		return fmt.Errorf("[MIGRATIONS] read migrations: %w", err)
