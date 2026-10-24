@@ -29,16 +29,6 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	defer conn.Release()
 
-	// create schema_migrations if it doesn't exist (conn.Exec)
-	_, err = conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			name		text PRIMARY KEY,
-			applied_at	timestamptz NOT NULL DEFAULT now()
-		)`)
-	if err != nil {
-		return fmt.Errorf("[MIGRATIONS] create schema_migrations; %w", err)
-	}
-
 	/****************************CONCURRENCY**************************************/
 
 	// LOCK ACQUISITION: blocks until no other instance holds the lock
@@ -55,8 +45,19 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	}()
 	/****************************END OF CONCURRENCY*******************************/
 
+	// create schema_migrations if it doesn't exist (conn.Exec)
+	_, err = conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			name		text PRIMARY KEY,
+			applied_at	timestamptz NOT NULL DEFAULT now()
+		)`)
+	if err != nil {
+		return fmt.Errorf("[MIGRATIONS] create schema_migrations; %w", err)
+	}
+
 	/*********************************MIGRATION***********************************/
-	// ReadFile returns []bytem later Exec will take a String
+
+	// ReadFile returns []byte later Exec will take a String
 	entries, err := fs.ReadDir(migrationsFS, "migrations") // Sorted by filename
 	if err != nil {
 		return fmt.Errorf("[MIGRATIONS] read migrations: %w", err)
@@ -84,7 +85,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 		// Reads SQL code inside the entry (now in RAM, thanks to by //go:embed)
 		sql, err := migrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
-			return fmt.Errorf("read %s: %w", name, err)
+			return fmt.Errorf("[MIGRATIONS] read %s: %w", name, err)
 		}
 
 		tx, err := conn.Begin(ctx) // Starts transaction on the dedicated connection
