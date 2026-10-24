@@ -109,6 +109,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 
 		log.Printf("[MIGRATIONS] applied %s", name)
 	}
+	/*****************************END OF MIGRATION********************************/
 	// If nil, every migration succeeded
 	// Now deferred unlock and conn.Release() will run
 	return nil

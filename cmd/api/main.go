@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jianlgler/musicbox/internal/db"
 )
 
 func main() {
@@ -33,6 +34,14 @@ func main() {
 		log.Fatalf("connect to database: %v", err)
 	}
 	log.Printf("connected to database")
+
+	// Bring the schema up to date before serving any request.
+	// Own timeout: may wait for another instance's migrations, so 5s is too tight
+	migrateCtx, cancelMigrate := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelMigrate()
+	if err := db.Migrate(migrateCtx, pool); err != nil {
+		log.Fatalf("[MIGRATIONS] migrate: %v", err) // It skips defer
+	}
 
 	mux := http.NewServeMux()
 
