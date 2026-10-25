@@ -25,7 +25,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
 	// One dedicated connection: advisory locks belong to a connection, not to the pool
 	conn, err := pool.Acquire(ctx) // borrows one connection explicitly and holds it
 	if err != nil {
-		return fmt.Errorf("acquire connection: %w", err)
+		return fmt.Errorf("[MIGRATIONS] acquire connection: %w", err)
 	}
 	defer conn.Release()
 
