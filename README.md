@@ -1,6 +1,6 @@
 # musicbox
 
-A self-hosted music server, shared with friends. Built as a learning project for a DevSecOps
+A self-hosted music server, shared with friends. Built as a learning project
 transition: system design, Go, Postgres, containers, and security practices along the way.
 
 **Status:** Week 1, in progress. The API serves health checks and a track list from Postgres.
@@ -34,12 +34,22 @@ curl -i 'localhost:8080/api/v1/tracks?limit=10'
 
 The password must stay URL-safe (letters and digits), because it's embedded in `DATABASE_URL`.
 
+## Tests
+
+```sh
+go test ./...                 # no Docker or database needed
+go test -race -cover ./...    # also check for data races, show coverage
+```
+
+The HTTP layer is tested with fakes for the database (see [docs/progress.md](docs/progress.md#automated-tests)).
+
 ## Layout
 
 ```
 cmd/api/main.go                  wiring: config, pool, migrations, HTTP server
 internal/httpapi/server.go       HTTP layer: routes, handlers, validation, JSON
 internal/httpapi/middleware.go   rules for every request: logging, security headers
+internal/httpapi/server_test.go  HTTP layer tests (fakes, no database)
 internal/tracks/tracks.go        data layer: Track type, SQL queries
 internal/db/migrate.go           migration runner (embedded SQL, advisory lock)
 internal/db/migrations/*.sql     schema changes, applied in filename order

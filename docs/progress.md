@@ -13,8 +13,8 @@
 | 6b | `GET /api/v1/tracks` with `limit` validation | done |
 | 6c | Handlers moved to `internal/httpapi`; `http.Server` with `ReadHeaderTimeout` | done |
 | 6d | Middleware: request logging, security headers | done |
-| 6e | Tests: `httptest`, table-driven, fakes through interfaces | next |
-| 7 | SeaweedFS (S3 API) in Compose, generated secrets | to do |
+| 6e | Tests: `httptest`, table-driven, fakes through interfaces | done |
+| 7 | SeaweedFS (S3 API) in Compose, generated secrets | next |
 | 8 | Design doc, Filesystem MCP server, push | to do |
 
 ## What each step taught
@@ -31,6 +31,31 @@
   `rows.Err()`, input validation and 400 vs 500, log injection and `%q`, the `http.Handler`
   interface, consumer-defined interfaces and implicit satisfaction, Slowloris, middleware and
   wrapping `ResponseWriter`, security headers.
+- **Step 6e:** `go test`, black-box test packages (`_test`), `httptest` recorders, table-driven
+  subtests, fakes with pointer receivers, negative (security) assertions, `-race` and `-cover`,
+  mutation checks (break the code, make sure a test fails).
+
+## Automated tests
+
+`go test ./...` runs in about a second with no Docker. `internal/httpapi` has 95.8% statement
+coverage. What `internal/httpapi/server_test.go` covers:
+
+| Test | Checks |
+| --- | --- |
+| `TestHealthz` | 200 even when the database is down |
+| `TestReadyz` | 200 when the database is up, 503 when it's down |
+| `TestListTracksLimit` | default 50; 1 and 200 accepted; 0, 201, -5, abc, 1.5 → 400 **and the data layer is never called** |
+| `TestListTracksDatabaseError` | 500 with a generic body; **no internal detail leaks** (IP, user, error text) |
+| `TestListTracksEmpty` | empty library → `{"tracks":[]}`, not `null` |
+| `TestListTracksBody` | JSON field names, `null` for missing tags, `sha256` **not exposed** |
+| `TestMethodNotAllowed` | `POST` → 405 |
+| `TestSecurityHeaders` | all four headers on a 200, a 405 and a 404 |
+
+Mutation check, done once: raising the cap to 300, removing `nosniff`, or returning the real
+database error each made a test fail.
+
+Not covered yet: the SQL in `internal/tracks` and the migration runner (need integration tests
+against real Postgres).
 
 ## Verified behavior
 

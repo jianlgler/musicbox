@@ -68,6 +68,12 @@ Set on every response by `securityHeaders` middleware:
 
 - Being in the `docker` group is equivalent to root on this machine.
 
+### Tests that guard security behavior
+
+`internal/httpapi/server_test.go` includes negative assertions, so a regression fails `go test`:
+invalid input never reaches the data layer, 500 responses don't leak internal error text,
+`sha256` isn't exposed, and all security headers are present on 200, 404 and 405 responses.
+
 ## Planned
 
 | Measure | When |
