@@ -14,8 +14,11 @@ once the server is shared, authenticated users are not automatically trusted.
 
 ### Network exposure
 
-- Postgres is published on `127.0.0.1:5432` only. Docker writes its own firewall rules and
-  bypasses `ufw`, so binding to `0.0.0.0` would expose the database to the network.
+- Postgres is published on `127.0.0.1:5432` only, and SeaweedFS's S3 API on `127.0.0.1:8333`.
+  Docker writes its own firewall rules and bypasses `ufw`, so binding to `0.0.0.0` would expose
+  them to the network.
+- `127.0.0.1` is one layer, not the whole defense: every program on the machine can reach it,
+  and web pages can too (DNS rebinding). That's why storage also requires signed requests.
 - The API listens on `127.0.0.1:8080` only.
 
 ### Input validation
@@ -57,6 +60,39 @@ Set on every response by `securityHeaders` middleware:
 | `Cache-Control` | `no-store` | Browsers or proxies keeping copies of private data |
 | `Referrer-Policy` | `no-referrer` | URLs (and tokens in them) leaking to other sites |
 | `Content-Security-Policy` | `frame-ancestors 'none'` | Clickjacking through frames |
+
+### Object storage (SeaweedFS)
+
+Details in [seaweedfs.md](seaweedfs.md).
+
+- **Least privilege:** the API's S3 identity (`musicbox-api`) can only Read, Write and List on
+  bucket `musicbox`. It can't create buckets or change permissions (verified: `AccessDenied`).
+  Bucket creation goes through the admin console (`weed shell`), reachable only inside the
+  container network.
+- **No anonymous access** (verified: unsigned requests get 403).
+- **Signed requests (SigV4):** the secret key never travels; each request carries an HMAC
+  signature scoped to a date, region and service. A wrong secret is refused (verified).
+- **Keys generated, not typed:** `scripts/gen-secrets.sh` writes random keys into `.env` and
+  `seaweedfs/s3.json`, both git-ignored and `600`. The script never prints a secret.
+- **Only the S3 port is published** (`127.0.0.1:8333`). Master, volume and filer have
+  unauthenticated admin APIs and stay internal.
+- The S3 config is mounted read-only into the container.
+- **Keys stay off command lines:** tools get them through environment variables
+  (`docker run -e VAR` with no value), never as arguments, where other users could read them
+  in the process list.
+
+### Supply chain
+
+Every image is pinned by digest, so a tag moved upstream can't silently change what runs. New
+images are only adopted once they're at least two weeks old.
+
+| Image | Version | Digest | Built |
+| --- | --- | --- | --- |
+| `postgres` | 17.11-alpine | `sha256:b0f9560a…552b24` | (running image at pin time) |
+| `chrislusf/seaweedfs` | 4.48 | `sha256:4e61d15f…72d` | 2026-09-28 |
+| `amazon/aws-cli` (tool) | 2.37.13 | `sha256:d32864c2…1e5196` | 2026-10-12 |
+
+The Postgres digest is a multi-architecture index, so the same pin works on amd64 and ARM.
 
 ### Database
 

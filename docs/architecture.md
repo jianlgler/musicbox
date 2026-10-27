@@ -29,7 +29,8 @@
 
 ## What exists today
 
-Only the API service and Postgres. Object storage arrives in Step 7.
+The API service, Postgres, and SeaweedFS (S3 object storage, bucket `musicbox`). The API
+doesn't talk to storage yet: that starts with the upload endpoint and the ingest worker.
 
 ## Layers inside the API
 

@@ -14,8 +14,8 @@
 | 6c | Handlers moved to `internal/httpapi`; `http.Server` with `ReadHeaderTimeout` | done |
 | 6d | Middleware: request logging, security headers | done |
 | 6e | Tests: `httptest`, table-driven, fakes through interfaces | done |
-| 7 | SeaweedFS (S3 API) in Compose, generated secrets | next |
-| 8 | Design doc, Filesystem MCP server, push | to do |
+| 7 | SeaweedFS (S3 API) in Compose, generated secrets, images pinned by digest ([seaweedfs.md](seaweedfs.md)) | done |
+| 8 | Design doc, Filesystem MCP server, push | next |
 
 ## What each step taught
 
@@ -34,6 +34,12 @@
 - **Step 6e:** `go test`, black-box test packages (`_test`), `httptest` recorders, table-driven
   subtests, fakes with pointer receivers, negative (security) assertions, `-race` and `-cover`,
   mutation checks (break the code, make sure a test fails).
+- **Step 7:** object storage vs database vs local disk, the S3 API as a portable standard,
+  SeaweedFS's parts, idempotent secret generation (and why `POSTGRES_PASSWORD` must never be
+  regenerated), least-privilege identities, SigV4 signing and the derived signing key, binding
+  inside a container vs publishing on the host, pinning images by digest and the two-week rule,
+  diagnosing `SignatureDoesNotMatch` (old `curl` signing a different payload hash), keeping
+  secrets off command lines.
 
 ## Automated tests
 
@@ -69,3 +75,6 @@ Checked by hand against a running server and Postgres:
 - A query cut off by a Postgres shutdown returns 500 (caught by `rows.Err()`).
 - An unfinished request is dropped after 5.0 s (`ReadHeaderTimeout`).
 - `/x%0Afake` is logged as `"/x\nfake"` on one line; `?token=...` never appears in the log.
+- SeaweedFS with the API's key: upload, byte-identical download, list and delete work; unsigned
+  requests get 403, a wrong secret gets `SignatureDoesNotMatch`, creating a bucket gets
+  `AccessDenied`. `gen-secrets.sh` kept all existing values and printed no secret.
