@@ -3,7 +3,7 @@
 A self-hosted music server, shared with friends. Built as a learning project
 transition: system design, Go, Postgres, containers, and security practices along the way.
 
-**Status:** Week 1, in progress. The API serves health checks and a track list from Postgres;
+**Status:** Week 1 complete. The API serves health checks and a track list from Postgres;
 SeaweedFS provides S3 object storage for audio. See [docs/progress.md](docs/progress.md).
 
 ## Quickstart
@@ -61,6 +61,7 @@ docs/                            documentation
 
 | Doc | Covers |
 | --- | --- |
+| [design.md](docs/design.md) | goals and non-goals, key flows, capacity, data model, threat model (STRIDE), alternatives, open questions |
 | [architecture.md](docs/architecture.md) | target system, layers, how a request flows, design decisions |
 | [api.md](docs/api.md) | every HTTP endpoint, parameters, responses |
 | [database.md](docs/database.md) | schema, migrations, how to inspect the database |

@@ -15,7 +15,7 @@
 | 6d | Middleware: request logging, security headers | done |
 | 6e | Tests: `httptest`, table-driven, fakes through interfaces | done |
 | 7 | SeaweedFS (S3 API) in Compose, generated secrets, images pinned by digest ([seaweedfs.md](seaweedfs.md)) | done |
-| 8 | Design doc, Filesystem MCP server, push | next |
+| 8 | Design doc: goals, flows, capacity, data model, threat model (STRIDE), alternatives ([design.md](design.md)) | done |
 
 ## What each step taught
 
@@ -40,6 +40,9 @@
   inside a container vs publishing on the host, pinning images by digest and the two-week rule,
   diagnosing `SignatureDoesNotMatch` (old `curl` signing a different payload hash), keeping
   secrets off command lines.
+- **Step 8:** writing a design doc: goals and non-goals, flows, back-of-envelope capacity,
+  assets, actors and trust boundaries, STRIDE threat modeling, recording rejected alternatives
+  and open questions.
 
 ## Automated tests
 
