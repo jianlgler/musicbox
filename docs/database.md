@@ -21,6 +21,91 @@ One row per audio file.
 `now()` returns the start time of the *transaction*, so rows inserted by one statement share
 the same `created_at`. That's why ordering always adds `id` as a tiebreaker.
 
+### `jobs`
+
+The work queue (migration `0002_jobs.sql`). One row per piece of background work; for now the
+only kind is `ingest_track` (read tags, extract cover art, mark the track ready).
+
+| Column | Type | Rules | Notes |
+| --- | --- | --- | --- |
+| `id` | `bigint` | identity, primary key | Sequential is fine: jobs are never exposed to clients |
+| `kind` | `text` | `NOT NULL`, one of `ingest_track` | Extended when a new kind of job appears |
+| `track_id` | `uuid` | `NOT NULL`, references `tracks(id)`, `ON DELETE CASCADE` | A real foreign key, so the track is guaranteed to exist |
+| `status` | `text` | `queued` / `running` / `done` / `failed`, default `queued` | |
+| `attempts` | `integer` | `>= 0`, default 0 | Incremented on every claim; doubles as the fencing token |
+| `max_attempts` | `integer` | `> 0`, default 5 | After this many failures the job is `failed` for good |
+| `run_at` | `timestamptz` | default `now()` | Not claimable before this time; retries move it into the future |
+| `locked_until` | `timestamptz` | required when `running` | The lease; once in the past, the job can be reclaimed |
+| `last_error` | `text` | nullable | Truncated; may contain text from the uploaded file (untrusted) |
+| `created_at`, `updated_at` | `timestamptz` | default `now()` | |
+
+Table check `jobs_check`: a `running` job must have a lease (`locked_until`).
+
+**Indexes:**
+
+| Index | Columns | Why |
+| --- | --- | --- |
+| `jobs_one_active_per_track` | unique `(kind, track_id)` where `queued` or `running` | At most one active job per track: re-uploads can't enqueue duplicate work. A new job is allowed once the old one is `done` or `failed` |
+| `jobs_queued_run_at` | `(run_at)` where `queued` | What the claim query searches |
+| `jobs_running_lease` | `(locked_until)` where `running` | Finding expired leases |
+
+All three are **partial** (`WHERE status = …`): finished jobs pile up, but the indexes only
+contain rows that are still in play, so they stay small.
+
+**How job and track statuses line up:**
+
+| `jobs.status` | `tracks.status` |
+| --- | --- |
+| `queued` or `running` | `pending` |
+| `done` | `ready` |
+| `failed` | `failed` |
+
+#### How the queue is used
+
+**Enqueue:** the track row and its job are inserted **in one transaction**, so a track can't be
+left `pending` with no job to finish it. (This is why the queue lives in Postgres: with Redis or
+Kafka the two writes couldn't share a transaction.)
+
+**Claim**, as one statement, committed immediately:
+
+```sql
+UPDATE jobs
+SET status = 'running', attempts = attempts + 1,
+    locked_until = now() + interval '5 minutes', updated_at = now()
+WHERE id = (
+    SELECT id FROM jobs
+    WHERE (status = 'queued'  AND run_at <= now())
+       OR (status = 'running' AND locked_until < now())   -- lease expired: worker died
+    ORDER BY run_at
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING id, track_id, attempts, max_attempts;
+```
+
+`FOR UPDATE` locks the chosen row; `SKIP LOCKED` makes other workers pass over it instead of
+waiting. The work then happens **outside** any transaction, protected by the lease, so no
+transaction or pooled connection is held open for the length of a job.
+
+**Finish**, only if this worker still owns the job:
+
+```sql
+UPDATE jobs SET status = 'done', locked_until = NULL, updated_at = now()
+WHERE id = $1 AND attempts = $2   -- $2 = the attempt number this worker claimed
+```
+
+If the lease expired and another worker reclaimed the job, `attempts` has moved on, the update
+matches 0 rows, and the slow worker knows it lost the job. `attempts` acts as a **fencing token**.
+
+**Fail:** retry with exponential backoff by setting `status = 'queued'` and
+`run_at = now() + delay` (30 s, 1 min, 2 min, 4 min); after `max_attempts`, set
+`status = 'failed'` and the track's status to `failed`, keeping a truncated `last_error`.
+
+**Delivery is at-least-once.** A worker can finish the work and crash before marking the job
+done; the lease expires and the job runs again. So every job must be **idempotent**: running it
+twice must give the same result as running it once. Ingest is: it sets the same tag values and
+writes the cover to the same key (`covers/<sha256>`).
+
 ### `schema_migrations`
 
 Created by the migration runner. One row per applied migration file.

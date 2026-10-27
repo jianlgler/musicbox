@@ -17,7 +17,29 @@
 | 7 | SeaweedFS (S3 API) in Compose, generated secrets, images pinned by digest ([seaweedfs.md](seaweedfs.md)) | done |
 | 8 | Design doc: goals, flows, capacity, data model, threat model (STRIDE), alternatives ([design.md](design.md)) | done |
 
-## What each step taught
+## Week 2: Ingest pipeline
+
+Upload a file, store it in SeaweedFS, and let a worker read its tags and cover art in the background.
+
+| Step | What | Status |
+| --- | --- | --- |
+| 1 | `jobs` table (migration `0002`) and queue design: `SKIP LOCKED`, leases, retries, fencing ([database.md](database.md#jobs)) | done |
+| 2 | `internal/storage`: S3 client in Go (AWS SDK), dependency vetting, `govulncheck` | next |
+| 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check | to do |
+| 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown | to do |
+| 5 | Tag parsing and cover art; fuzz testing the parser | to do |
+| 6 | Library endpoints: artists, albums, search | to do |
+| 7 | Integration tests against real Postgres and SeaweedFS | to do |
+| 8 | Docs and commit | to do |
+
+### What Week 2 taught
+
+- **Step 1:** queues in Postgres, `FOR UPDATE SKIP LOCKED`, holding a lock vs a lease, fencing
+  tokens, exponential backoff, at-least-once delivery and idempotent jobs, why enqueueing must
+  share a transaction with the data it refers to, sequential vs random IDs, foreign keys vs a
+  generic payload, partial and partial-unique indexes, untrusted text in error messages.
+
+## What each step taught (Week 1)
 
 - **Step 2:** `net/http` handlers, method patterns (`GET /healthz`), headers are sent on the
   first write (`Content-Type` must be set before the body), errors as values.

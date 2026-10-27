@@ -43,6 +43,9 @@ once the server is shared, authenticated users are not automatically trusted.
 - **Query strings are never logged.** Stream tokens will travel in URLs (HTML `<audio>` can't
   send an `Authorization` header).
 - Every request is logged by middleware, including ones the router rejects (404, 405).
+- **Errors can carry attacker text.** `jobs.last_error` may quote content from an uploaded file
+  (for example a tag the parser choked on). It's truncated when stored, and must be treated as
+  untrusted wherever it's shown: escaped in logs, never rendered as HTML (stored XSS otherwise).
 
 ### HTTP server
 
