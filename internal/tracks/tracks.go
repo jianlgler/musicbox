@@ -3,9 +3,11 @@ package tracks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -32,7 +34,7 @@ func NewStore(pool *pgxpool.Pool) *Store {
 func (s *Store) List(ctx context.Context, limit int) ([]Track, error) {
 	// id breaks ties between tracks created in the same microsecond, so the order is stable
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, title, artist, album, status, size_bytes, created_at
+		SELECT `+trackColumns+`
 		FROM tracks
 		ORDER BY created_at DESC, id
 		LIMIT $1`, limit)
@@ -44,8 +46,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Track, error) {
 	result := []Track{} // Not a nil slice: an empty list must encode as [], not null
 	for rows.Next() {
 		var t Track
-		// Same order as the SELECT
-		if err := rows.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.Status, &t.SizeBytes, &t.CreatedAt); err != nil {
+		if err := scanTrack(rows, &t); err != nil {
 			return nil, fmt.Errorf("[TRACKS] scan track: %w", err)
 		}
 		result = append(result, t)
@@ -55,4 +56,55 @@ func (s *Store) List(ctx context.Context, limit int) ([]Track, error) {
 		return nil, fmt.Errorf("[TRACKS] iterate tracks: %w", err)
 	}
 	return result, nil
+}
+
+// Same columns, same order, for every query that returns a Track
+const trackColumns = `id, title, artist, album, status, size_bytes, created_at`
+
+func scanTrack(row pgx.Row, t *Track) error {
+	return row.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.Status, &t.SizeBytes, &t.CreatedAt)
+}
+
+// Create records an uploaded file whose bytes are already in storage, and enqueues its ingest job.
+// If a track with this sha256 exists, it returns that track with created=false and enqueues nothing:
+// uploading the same file twice is harmless. The caller is responsible for computing sha256
+// from the bytes itself, never taking it from the client.
+func (s *Store) Create(ctx context.Context, sha256 string, size int64) (t Track, created bool, err error) {
+	// One transaction: a track can never be left pending without a job to finish it
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Track{}, false, fmt.Errorf("[TRACKS] begin: %w", err)
+	}
+	// After a successful Commit this is a no-op; on any early return it undoes everything
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// ON CONFLICT DO NOTHING + RETURNING returns no row when the sha256 already exists.
+	// Two identical uploads at the same moment: the second INSERT waits for the first to commit,
+	// then does nothing, so there's still exactly one row.
+	err = scanTrack(tx.QueryRow(ctx, `
+		INSERT INTO tracks (sha256, size_bytes) VALUES ($1, $2)
+		ON CONFLICT (sha256) DO NOTHING
+		RETURNING `+trackColumns, sha256, size), &t)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Already there. Read Committed: this new statement sees the row the other upload committed.
+		if err := scanTrack(tx.QueryRow(ctx, `SELECT `+trackColumns+` FROM tracks WHERE sha256 = $1`, sha256), &t); err != nil {
+			return Track{}, false, fmt.Errorf("[TRACKS] select existing track: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return Track{}, false, fmt.Errorf("[TRACKS] commit: %w", err)
+		}
+		return t, false, nil
+	}
+	if err != nil {
+		return Track{}, false, fmt.Errorf("[TRACKS] insert track: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx, `INSERT INTO jobs (kind, track_id) VALUES ('ingest_track', $1)`, t.ID); err != nil {
+		return Track{}, false, fmt.Errorf("[TRACKS] enqueue ingest job: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Track{}, false, fmt.Errorf("[TRACKS] commit: %w", err)
+	}
+	return t, true, nil
 }

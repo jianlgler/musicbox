@@ -52,7 +52,7 @@ There's no anonymous role: every request except `/healthz` and `/readyz` will re
 client → GET /api/v1/tracks?limit=N → validate → SELECT … ORDER BY created_at DESC, id LIMIT N → JSON
 ```
 
-### Adding a track (planned)
+### Adding a track (upload built; worker planned)
 
 ```
 1. upload or musicctl import
@@ -158,7 +158,7 @@ STRIDE is a checklist of six threat types. Status: ✅ in place, 🔜 planned.
 | **S**poofing (pretending to be someone) | A request to S3 without the real key | SigV4 signatures; no anonymous S3 identity | ✅ |
 | | Logging in as another member | Hashed passwords, invite-only accounts, sessions or JWTs with short lifetimes | 🔜 |
 | **T**ampering (changing data) | Altering a request to storage in transit | Signatures cover method, path, headers and time | ✅ |
-| | Uploading a file whose content doesn't match its claimed hash | Server computes the SHA-256 itself; never trusts a client-supplied hash | 🔜 |
+| | Uploading a file whose content doesn't match its claimed hash | Server computes the SHA-256 itself; never trusts a client-supplied hash | ✅ |
 | | Changing the schema half-way | Transactional migrations under an advisory lock | ✅ |
 | **R**epudiation (denying an action) | A member denies deleting a track | Request logging; `tracks.added_by`; an audit log of destructive actions | partly ✅ (request log) |
 | | Forged lines hiding an attacker's actions in logs | Client input logged with `%q` (no newlines); query strings never logged | ✅ |
@@ -169,7 +169,7 @@ STRIDE is a checklist of six threat types. Status: ✅ in place, 🔜 planned.
 | | Stream tokens leaking through URLs | Short-lived, single-track tokens; `Referrer-Policy: no-referrer`; tokens never logged | partly ✅ |
 | **D**enial of service | Huge list requests | `limit` capped at 200 | ✅ |
 | | Slowloris connections | `ReadHeaderTimeout: 5s` | ✅ |
-| | Uploading enormous or endless files | Upload size limit, per-member quota | 🔜 |
+| | Uploading enormous or endless files | Upload size limit and read deadline ✅; per-member quota 🔜 | partly ✅ |
 | | One member flooding the API | Rate limiting per member | 🔜 |
 | | Crafted audio crashing the ingest worker | Worker isolated from the API; per-job timeouts; failures marked `failed`, not retried forever | 🔜 |
 | **E**levation of privilege | A member doing owner actions | Role checks on owner-only endpoints | 🔜 |

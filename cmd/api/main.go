@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jianlgler/musicbox/internal/db"
 	"github.com/jianlgler/musicbox/internal/httpapi"
+	"github.com/jianlgler/musicbox/internal/storage"
 	"github.com/jianlgler/musicbox/internal/tracks"
 )
 
@@ -44,11 +45,32 @@ func main() {
 		log.Fatalf("migrate: %v", err) // It skips defer
 	}
 
+	// Object storage. Never log the keys; New validates that all four are set.
+	objects, err := storage.New(storage.Config{
+		Endpoint:  os.Getenv("S3_ENDPOINT"),
+		Bucket:    os.Getenv("S3_BUCKET"),
+		AccessKey: os.Getenv("S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("S3_SECRET_KEY"),
+	})
+	if err != nil {
+		log.Fatalf("[CONFIG] %v", err)
+	}
+	storageCtx, cancelStorage := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStorage()
+	if err := objects.Ping(storageCtx); err != nil { // wrong keys or missing bucket fail here, not on the first upload
+		log.Fatalf("[STORAGE] connect to object storage: %v", err)
+	}
+	log.Printf("[STORAGE] connected to object storage")
+
 	srv := &http.Server{
 		Addr:    "127.0.0.1:8080",
-		Handler: httpapi.New(pool, tracks.NewStore(pool)), // Created once, shared by every request
+		Handler: httpapi.New(pool, tracks.NewStore(pool), objects), // Created once, shared by every request
 		// Slowloris: without it, a client sending headers one byte at a time holds a connection forever
 		ReadHeaderTimeout: 5 * time.Second,
+		// The same attack on the body. Uploads raise their own deadline (see httpapi/upload.go)
+		ReadTimeout: 30 * time.Second,
+		// Close keep-alive connections nobody uses
+		IdleTimeout: 2 * time.Minute,
 	}
 
 	log.Printf("[HTTP] listening on %s", srv.Addr)

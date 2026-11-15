@@ -29,6 +29,24 @@ once the server is shared, authenticated users are not automatically trusted.
 - The database enforces its own rules (`CHECK`, `UNIQUE`, `NOT NULL`), so bad data is rejected
   even if application code has a bug.
 
+### Uploads (`POST /api/v1/tracks`)
+
+| Measure | Against |
+| --- | --- |
+| Size limit 200 MiB: refused up front if `Content-Length` says so, and enforced while reading with `http.MaxBytesReader` (`Content-Length` can lie or be missing) | Filling the disk or RAM with one request |
+| `ReadTimeout: 30s` for every request; uploads raise their own deadline to 10 minutes (`http.ResponseController`) | Slowloris on the body: trickling bytes to hold a connection |
+| File type from magic bytes, allowlist only; the stored `Content-Type` is the detected one | HTML or scripts stored as "audio" and later served to a browser; executables in the library |
+| SHA-256 computed by the server from the bytes it received | A client claiming a hash to overwrite or point at someone else's file |
+| Object stored **before** the row; row and job in one transaction | Rows pointing at missing audio; tracks stuck `pending` with no job |
+| Temp file always deleted, on success and on every error path (tested) | Copies of uploads piling up on disk |
+| Raw body, not `multipart/form-data` | One less parser handling untrusted input |
+
+`/tmp` is RAM-backed (tmpfs) on Fedora, so concurrent large uploads use memory. Set `TMPDIR` to
+a directory on disk when running for real.
+
+The upload is still unauthenticated, like every route: the API is reachable only from this
+machine until authentication arrives. A per-member quota and rate limit come with it.
+
 ### Error handling
 
 - Clients get generic error messages (`internal error`, `unavailable`). Database errors can
@@ -80,6 +98,10 @@ Details in [seaweedfs.md](seaweedfs.md).
 - **Only the S3 port is published** (`127.0.0.1:8333`). Master, volume and filer have
   unauthenticated admin APIs and stay internal.
 - The S3 config is mounted read-only into the container.
+- **The Go client (`internal/storage`)** keeps the secret key out of every error message and
+  never sends it: SigV4 sends only the access key and a signature (tested). Object keys come
+  only from `AudioKey`, which accepts exactly 64 lowercase hex characters, so input can't
+  produce a key outside `audio/`.
 - **Keys stay off command lines:** tools get them through environment variables
   (`docker run -e VAR` with no value), never as arguments, where other users could read them
   in the process list.
@@ -97,6 +119,49 @@ images are only adopted once they're at least two weeks old.
 
 The Postgres digest is a multi-architecture index, so the same pin works on amd64 and ARM.
 
+#### Go modules
+
+The same two-week rule applies to Go modules: a version is adopted only if it was published at
+least 14 days earlier, which gives the community time to notice a compromised or broken release.
+`go.sum` pins the exact bytes of every module, like a digest does for images.
+
+Check the publish date of any module version:
+
+```sh
+go list -m -f '{{.Path}} {{.Version}} {{.Time.Format "2006-01-02"}}' all
+```
+
+Vetting done on 2026-11-15 for the S3 client (cutoff 2026-11-01):
+
+| Module | Version | Published | Why |
+| --- | --- | --- | --- |
+| `github.com/aws/aws-sdk-go-v2/service/s3` | v1.114.6 | 2026-10-27 | Newest before the cutoff (v1.114.10 was 5 days old) |
+| `github.com/aws/aws-sdk-go-v2` + 9 internal modules | (pulled by s3) | 2026-10-27 | Same release; all published by AWS |
+| `github.com/aws/smithy-go` | v1.28.7 | 2026-10-27 | AWS's runtime for generated SDKs |
+| `golang.org/x/text` | v0.43.0 (was v0.29.0) | 2026-10-09 | Fixes GO-2026-5970 and GO-2026-6629, found by `govulncheck` |
+| `golang.org/x/sync` | v0.24.0 (was v0.17.0) | 2026-09-23 | Required by the new `x/text` |
+
+Deliberately **not** used: `aws-sdk-go-v2/config` and `aws-sdk-go-v2/credentials`. `config`
+pulls in SSO, STS and EC2 metadata clients and silently reads `~/.aws` and `AWS_*` variables.
+The client is built with `s3.New(s3.Options{...})`, so every setting is explicit in
+`internal/storage`, and fewer modules means less code to trust.
+
+#### Known vulnerabilities: `govulncheck`
+
+```sh
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+```
+
+- Run through `go run …@version`: the tool's version is pinned and nothing is installed globally
+  or added to `go.mod`. v1.9.0 was published 2026-10-11.
+- It checks the Go vulnerability database and reports only vulnerabilities in code the program
+  can **actually call** (it follows the call graph), with an example trace, so findings are
+  real, not noise.
+- Exit status 3 means vulnerabilities were found. That makes it ready for CI.
+- First run (2026-11-15): two vulnerabilities in `golang.org/x/text` v0.29.0, reachable through
+  `pgxpool.Pool.Acquire` from `db.Migrate`. Fixed by upgrading to v0.43.0; the rerun reports
+  `No vulnerabilities found`.
+
 ### Database
 
 - Random UUIDs for IDs, so they can't be enumerated by counting.
@@ -113,6 +178,10 @@ The Postgres digest is a multi-architecture index, so the same pin works on amd6
 invalid input never reaches the data layer, 500 responses don't leak internal error text,
 `sha256` isn't exposed, and all security headers are present on 200, 404 and 405 responses.
 
+`internal/storage/storage_test.go` checks that requests are SigV4-signed with the access key,
+that the secret key never appears in a header, URL, body or error, that `AudioKey` rejects
+traversal and non-hex input, and that a 403 is never mistaken for "object missing".
+
 ## Planned
 
 | Measure | When |
@@ -122,7 +191,7 @@ invalid input never reaches the data layer, 500 responses don't leak internal er
 | Separate Postgres roles: migrator (owns schema) vs app (rows only), so SQL injection can't drop tables | later |
 | `Strict-Transport-Security` and `sslmode=require` | when TLS arrives (AWS) |
 | Panic-recovery, rate-limiting, request-ID middleware | hardening / observability weeks |
-| `gosec`, dependency and image scanning in CI | CI weeks |
+| `gosec`, `govulncheck`, image scanning in CI | CI weeks |
 | Structured logging (`log/slog`, JSON) | observability weeks |
 
 ## Legal note

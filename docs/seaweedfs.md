@@ -136,6 +136,31 @@ echo "s3.bucket.create -name musicbox" | docker compose exec -T seaweedfs weed s
 reachable inside the container network. The API's S3 identity deliberately can't create
 buckets, so this is the admin path.
 
+## Using it from Go: `internal/storage`
+
+```go
+store, err := storage.New(storage.Config{
+    Endpoint: os.Getenv("S3_ENDPOINT"), Bucket: os.Getenv("S3_BUCKET"),
+    AccessKey: os.Getenv("S3_ACCESS_KEY"), SecretKey: os.Getenv("S3_SECRET_KEY"),
+})
+key, err := storage.AudioKey(sha256Hex)          // "audio/<sha256>", rejects anything else
+err = store.Put(ctx, key, file, size, "audio/mpeg")
+ok, err := store.Exists(ctx, key)                // HEAD: no download
+body, err := store.Get(ctx, key)                 // caller must Close; ErrNotFound if missing
+err = store.Delete(ctx, key)                     // missing key is not an error
+err = store.Ping(ctx)                            // HEAD bucket: reachable, keys right, bucket exists
+```
+
+- Built with `s3.New(s3.Options{…})`, not the SDK's `config` package, which would also read
+  `~/.aws`, `AWS_*` variables and the EC2 metadata service. See [security.md](security.md#go-modules).
+- `UsePathStyle: true` gives `http://host/musicbox/key`. Virtual-host style
+  (`http://musicbox.host/key`) needs a DNS name per bucket. With an IP endpoint like
+  `127.0.0.1` the SDK falls back to path style anyway, but a hostname (the NAS) would break
+  without it.
+- `Region` is `us-east-1`. SeaweedFS ignores regions, but SigV4 signs the region name, so
+  both sides must agree on one.
+- Used by `POST /api/v1/tracks`. `cmd/api` builds it from the `S3_*` variables and calls `Ping` at startup, so wrong keys or a missing bucket stop the API immediately.
+
 ## Using it from the command line
 
 The official AWS CLI, run in a container pinned by digest, so nothing is installed on the host:

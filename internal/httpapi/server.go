@@ -30,19 +30,27 @@ type TrackLister interface {
 	List(ctx context.Context, limit int) ([]tracks.Track, error)
 }
 
+// TrackStore is everything the server needs from the data layer
+type TrackStore interface {
+	TrackLister
+	TrackCreator
+}
+
 type Server struct {
 	db      Pinger
-	tracks  TrackLister
+	tracks  TrackStore
+	objects ObjectStore
 	mux     *http.ServeMux
 	handler http.Handler // mux wrapped in middleware
 }
 
-func New(db Pinger, tracks TrackLister) *Server {
-	s := &Server{db: db, tracks: tracks, mux: http.NewServeMux()}
+func New(db Pinger, tracks TrackStore, objects ObjectStore) *Server {
+	s := &Server{db: db, tracks: tracks, objects: objects, mux: http.NewServeMux()}
 
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /api/v1/tracks", s.handleListTracks)
+	s.mux.HandleFunc("POST /api/v1/tracks", s.handleUploadTrack)
 
 	// Outermost runs first and finishes last: logging sees the final status and the full duration.
 	// Wrapped here and not in main, so tests through New cover the middleware too.

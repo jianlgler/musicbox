@@ -30,7 +30,8 @@
 ## What exists today
 
 The API service, Postgres, and SeaweedFS (S3 object storage, bucket `musicbox`). The API
-doesn't talk to storage yet: that starts with the upload endpoint and the ingest worker.
+stores uploads in SeaweedFS (`POST /api/v1/tracks`) and enqueues an ingest job for each new
+track; the worker that runs those jobs is next.
 
 ## Layers inside the API
 

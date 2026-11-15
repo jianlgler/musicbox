@@ -3,7 +3,7 @@
 A self-hosted music server, shared with friends. Built as a learning project
 transition: system design, Go, Postgres, containers, and security practices along the way.
 
-**Status:** Week 2 in progress. The API serves health checks and a track list from Postgres;
+**Status:** Week 2 in progress. The API serves health checks, a track list from Postgres, and uploads;
 SeaweedFS provides S3 object storage for audio. See [docs/progress.md](docs/progress.md).
 
 ## Quickstart
@@ -28,6 +28,7 @@ go run ./cmd/api
 # 5. Try it
 curl -i localhost:8080/readyz
 curl -i 'localhost:8080/api/v1/tracks?limit=10'
+curl -i --data-binary @song.flac localhost:8080/api/v1/tracks   # upload
 ```
 
 Both containers restart on their own when Docker starts (`restart: unless-stopped`).
@@ -38,6 +39,7 @@ To work with the stored files from the command line, see [docs/seaweedfs.md](doc
 ```sh
 go test ./...                 # no Docker or database needed
 go test -race -cover ./...    # also check for data races, show coverage
+go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...   # known vulnerabilities in reachable code
 ```
 
 The HTTP layer is tested with fakes for the database (see [docs/progress.md](docs/progress.md#automated-tests)).
@@ -50,6 +52,9 @@ internal/httpapi/server.go       HTTP layer: routes, handlers, validation, JSON
 internal/httpapi/middleware.go   rules for every request: logging, security headers
 internal/httpapi/server_test.go  HTTP layer tests (fakes, no database)
 internal/tracks/tracks.go        data layer: Track type, SQL queries
+internal/httpapi/upload.go       POST /api/v1/tracks: size limit, type check, hashing, store, enqueue
+internal/storage/storage.go      object storage layer: S3 client (Put, Get, Exists, Delete, Ping)
+internal/audio/sniff.go          recognises audio formats from their first bytes
 internal/db/migrate.go           migration runner (embedded SQL, advisory lock)
 internal/db/migrations/*.sql     schema changes, applied in filename order
 compose.yaml                     local Postgres and SeaweedFS (images pinned by digest)

@@ -5,6 +5,8 @@ package httpapi_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,17 +21,69 @@ type fakeDB struct{ err error }
 
 func (f fakeDB) Ping(context.Context) error { return f.err }
 
-// fakeTracks satisfies httpapi.TrackLister. Pointer receiver, so the test can read what List recorded.
+// fakeTracks satisfies httpapi.TrackStore. Pointer receiver, so the test can read what was recorded.
 type fakeTracks struct {
 	list     []tracks.Track
 	err      error
 	called   bool
 	gotLimit int
+
+	// Create
+	created     bool // what Create reports: true = new track
+	createErr   error
+	createCalls int
+	gotSHA256   string
+	gotSize     int64
 }
 
 func (f *fakeTracks) List(_ context.Context, limit int) ([]tracks.Track, error) {
 	f.called, f.gotLimit = true, limit
 	return f.list, f.err
+}
+
+func (f *fakeTracks) Create(_ context.Context, sha256 string, size int64) (tracks.Track, bool, error) {
+	f.createCalls++
+	f.gotSHA256, f.gotSize = sha256, size
+	if f.createErr != nil {
+		return tracks.Track{}, false, f.createErr
+	}
+	return tracks.Track{ID: "11111111-2222-3333-4444-555555555555", Status: "pending", SizeBytes: size}, f.created, nil
+}
+
+// fakeObjects satisfies httpapi.ObjectStore, keeping objects in memory
+type fakeObjects struct {
+	objects   map[string][]byte
+	types     map[string]string
+	existsErr error
+	putErr    error
+	puts      int
+}
+
+func (f *fakeObjects) Exists(_ context.Context, key string) (bool, error) {
+	if f.existsErr != nil {
+		return false, f.existsErr
+	}
+	_, ok := f.objects[key]
+	return ok, nil
+}
+
+func (f *fakeObjects) Put(_ context.Context, key string, body io.Reader, size int64, contentType string) error {
+	f.puts++
+	if f.putErr != nil {
+		return f.putErr
+	}
+	b, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	if int64(len(b)) != size {
+		return fmt.Errorf("size %d but body has %d bytes", size, len(b))
+	}
+	if f.objects == nil {
+		f.objects, f.types = map[string][]byte{}, map[string]string{}
+	}
+	f.objects[key], f.types[key] = b, contentType
+	return nil
 }
 
 // do sends one request through the whole server (middleware + mux + handler), in memory
@@ -47,7 +101,7 @@ func body(rec *httptest.ResponseRecorder) string {
 
 func TestHealthz(t *testing.T) {
 	// The DB is down, liveness must not care
-	srv := httpapi.New(fakeDB{err: errors.New("db down")}, &fakeTracks{})
+	srv := httpapi.New(fakeDB{err: errors.New("db down")}, &fakeTracks{}, &fakeObjects{})
 
 	rec := do(t, srv, "GET", "/healthz")
 
@@ -71,7 +125,7 @@ func TestReadyz(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			srv := httpapi.New(fakeDB{err: tc.dbErr}, &fakeTracks{})
+			srv := httpapi.New(fakeDB{err: tc.dbErr}, &fakeTracks{}, &fakeObjects{})
 
 			rec := do(t, srv, "GET", "/readyz")
 
@@ -104,7 +158,7 @@ func TestListTracksLimit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeTracks{list: []tracks.Track{}}
-			srv := httpapi.New(fakeDB{}, fake)
+			srv := httpapi.New(fakeDB{}, fake, &fakeObjects{})
 
 			rec := do(t, srv, "GET", "/api/v1/tracks"+tc.query)
 
@@ -131,7 +185,7 @@ func TestListTracksLimit(t *testing.T) {
 func TestListTracksDatabaseError(t *testing.T) {
 	// An error full of internals that must never reach the client
 	fake := &fakeTracks{err: errors.New("connect 10.0.0.5 user=admin: boom")}
-	srv := httpapi.New(fakeDB{}, fake)
+	srv := httpapi.New(fakeDB{}, fake, &fakeObjects{})
 
 	rec := do(t, srv, "GET", "/api/v1/tracks")
 
@@ -150,7 +204,7 @@ func TestListTracksDatabaseError(t *testing.T) {
 }
 
 func TestListTracksEmpty(t *testing.T) {
-	srv := httpapi.New(fakeDB{}, &fakeTracks{list: []tracks.Track{}})
+	srv := httpapi.New(fakeDB{}, &fakeTracks{list: []tracks.Track{}}, &fakeObjects{})
 
 	rec := do(t, srv, "GET", "/api/v1/tracks")
 
@@ -165,7 +219,7 @@ func TestListTracksBody(t *testing.T) {
 	fake := &fakeTracks{list: []tracks.Track{
 		{ID: "id-1", Title: &title, Status: "ready", SizeBytes: 1000},
 	}}
-	srv := httpapi.New(fakeDB{}, fake)
+	srv := httpapi.New(fakeDB{}, fake, &fakeObjects{})
 
 	rec := do(t, srv, "GET", "/api/v1/tracks")
 
@@ -185,9 +239,9 @@ func TestListTracksBody(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	srv := httpapi.New(fakeDB{}, &fakeTracks{})
+	srv := httpapi.New(fakeDB{}, &fakeTracks{}, &fakeObjects{})
 
-	rec := do(t, srv, "POST", "/api/v1/tracks")
+	rec := do(t, srv, "DELETE", "/api/v1/tracks") // POST is a real route now (upload)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("status = %d, want 405", rec.Code)
@@ -204,11 +258,11 @@ func TestSecurityHeaders(t *testing.T) {
 	// A defined route, a rejected method and an unknown path: middleware must cover all of them
 	for _, target := range []struct{ method, path string }{
 		{"GET", "/healthz"},
-		{"POST", "/api/v1/tracks"},
+		{"DELETE", "/api/v1/tracks"},
 		{"GET", "/nope"},
 	} {
 		t.Run(target.method+" "+target.path, func(t *testing.T) {
-			srv := httpapi.New(fakeDB{}, &fakeTracks{list: []tracks.Track{}})
+			srv := httpapi.New(fakeDB{}, &fakeTracks{list: []tracks.Track{}}, &fakeObjects{})
 
 			rec := do(t, srv, target.method, target.path)
 

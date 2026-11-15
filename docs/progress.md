@@ -24,9 +24,9 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
 | Step | What | Status |
 | --- | --- | --- |
 | 1 | `jobs` table (migration `0002`) and queue design: `SKIP LOCKED`, leases, retries, fencing ([database.md](database.md#jobs)) | done |
-| 2 | `internal/storage`: S3 client in Go (AWS SDK), dependency vetting, `govulncheck` | next |
-| 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check | to do |
-| 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown | to do |
+| 2 | `internal/storage`: S3 client in Go (AWS SDK), dependency vetting, `govulncheck` ([security.md](security.md#go-modules)) | done |
+| 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check ([api.md](api.md#post-apiv1tracks-upload-a-track)) | done |
+| 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown | next |
 | 5 | Tag parsing and cover art; fuzz testing the parser | to do |
 | 6 | Library endpoints: artists, albums, search | to do |
 | 7 | Integration tests against real Postgres and SeaweedFS | to do |
@@ -38,6 +38,23 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
   tokens, exponential backoff, at-least-once delivery and idempotent jobs, why enqueueing must
   share a transaction with the data it refers to, sequential vs random IDs, foreign keys vs a
   generic payload, partial and partial-unique indexes, untrusted text in error messages.
+- **Step 2:** vetting dependencies (publish dates, the two-week rule applied to Go modules,
+  who publishes what, minimal vs convenience packages), `go.sum` as a pin, `govulncheck` and
+  call-graph reachability, upgrading a transitive dependency for a security fix, building an
+  SDK client explicitly instead of from ambient config, path vs virtual-host style S3 URLs
+  (and the SDK's silent fallback for IP endpoints), mapping SDK errors to a sentinel
+  (`NoSuchKey` vs `NotFound` on HEAD), faking an HTTP service with `httptest.Server`.
+- **Step 3:** raw body vs multipart, `http.MaxBytesReader` and why `Content-Length` can't be
+  trusted, per-request deadlines with `http.ResponseController` (`ReadTimeout` vs
+  `ReadHeaderTimeout`), magic-byte sniffing and allowlists, never trusting the client's
+  `Content-Type` or hash, spooling to a temp file because the key is only known at the end,
+  `io.MultiWriter`/`io.MultiReader`, telling a disk error from a client error, ordering writes
+  across two systems that can't share a transaction, `INSERT … ON CONFLICT DO NOTHING RETURNING`
+  and concurrent duplicates under Read Committed, 201 vs 200 for idempotent creates.
+
+**Step 4 must handle:** the claim query reclaims an expired `running` job without checking
+`attempts < max_attempts`, so a worker that keeps crashing on a job's last attempt would loop
+forever. A job reclaimed past its limit must be marked `failed` instead of run.
 
 ## What each step taught (Week 1)
 
@@ -85,8 +102,41 @@ coverage. What `internal/httpapi/server_test.go` covers:
 Mutation check, done once: raising the cap to 300, removing `nosniff`, or returning the real
 database error each made a test fail.
 
-Not covered yet: the SQL in `internal/tracks` and the migration runner (need integration tests
-against real Postgres).
+`internal/storage` (92.3% coverage) is tested against an `httptest.Server` standing in for S3:
+
+| Test | Checks |
+| --- | --- |
+| `TestNewValidatesConfig` | every field required; endpoint must be `http(s)://host`; **no error leaks the secret** |
+| `TestAudioKey` | 64 lowercase hex only: uppercase, short, long, `../`, `/`, trailing newline rejected |
+| `TestPutSignsPathStyleRequest` | `PUT /musicbox/audio/<sha256>`, SigV4 for our access key, body and Content-Type sent, **secret never on the wire** |
+| `TestExists` | HEAD (no download); 200 → true, 404 → false, **403 and 500 → error, not "missing"** |
+| `TestGet`, `TestGetNotFound` | body returned; `NoSuchKey` → `ErrNotFound` |
+| `TestDeleteAndPing`, `TestPingFailsOnWrongKey` | Delete works; Ping is `HEAD /musicbox`; a 403 fails without leaking the secret |
+
+Mutation check: virtual-host style, dropping the HEAD `NotFound` mapping, an unanchored hash
+regexp, and removing the scheme check each made a test fail. Virtual-host style survived at
+first, because the SDK quietly falls back to path style for an IP endpoint; the tests now use
+`localhost` so the setting is really exercised.
+
+Upload (`internal/httpapi/upload_test.go`, package coverage 91.1%; `internal/audio` 100%):
+
+| Test | Checks |
+| --- | --- |
+| `TestUploadNewTrack` | 201; stored under `audio/<server-computed sha256>`; stored type is the **detected** `audio/flac`, not the client's `text/html`; hash not in the response; temp file gone |
+| `TestUploadSameFileTwice` | 200, and the bytes are **not uploaded again** |
+| `TestUploadOrphanObject` | object already stored but no row (crash recovery): row created, no second upload |
+| `TestUploadRejected` | empty → 400, HTML / ELF / multipart → 415, chunked over 200 MiB → 413, disconnect → 400; **never reaches storage or the database**; temp file gone |
+| `TestUploadTooLargeContentLength` | 413 **without reading a byte** |
+| `TestUploadServerErrors` | storage HEAD, storage PUT or database failing → generic 500, no leak; **no row when the object wasn't stored** |
+| `TestDetect` (`internal/audio`) | each format recognised; HTML, ELF, ZIP, MP4 video, AVI, AAC, multipart and reserved MP3 header values rejected |
+
+Mutation check: removing the read limit, the early `Content-Length` check or the temp-file
+cleanup; trusting the client's `Content-Type`; re-uploading existing objects; answering 201 for
+duplicates; ignoring a storage error; creating the row after a failed Put. All 8 made a test fail.
+
+Not covered yet: the SQL in `internal/tracks` (including `Create`'s transaction and duplicate
+handling), the migration runner, and `internal/storage` against real SeaweedFS (need
+integration tests, Step 7).
 
 ## Verified behavior
 
@@ -103,3 +153,17 @@ Checked by hand against a running server and Postgres:
 - SeaweedFS with the API's key: upload, byte-identical download, list and delete work; unsigned
   requests get 403, a wrong secret gets `SignatureDoesNotMatch`, creating a bucket gets
   `AccessDenied`. `gen-secrets.sh` kept all existing values and printed no secret.
+
+Week 2, checked on 2026-11-15 against real Postgres and SeaweedFS:
+
+- The API pings storage at startup; with the real keys it starts, applies `0001` and `0002`.
+- `internal/storage` (Go client): `Exists` false and `Get` → `ErrNotFound` for a missing key;
+  Put, Exists, Get (same bytes) and Delete work; deleting a missing key is not an error. A wrong
+  secret gets 403 and the error contains neither secret; writing to another bucket gets 403.
+- Upload of a generated 2 s WAV: 201, then 200 for the same file. A FLAC made from it: 201.
+  Postgres has one `pending` track per file, each with one `queued` `ingest_track` job, and
+  `tracks.sha256` equals `sha256sum` of the file.
+- Objects are stored under `audio/<sha256>` with the detected type (`audio/wav`, `audio/flac`);
+  downloaded with the AWS CLI, they're byte-identical.
+- HTML → 415, empty body → 400, 201 MiB chunked → 413. No `/tmp/musicbox-upload-*` file remains.
+- 10 identical uploads of a new file at the same moment: one 201, nine 200, one track, one job.
