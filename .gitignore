@@ -1,3 +1,12 @@
 .env
 /bin/
 /seaweedfs/s3.json
+
+# Audio files: never commit music (copyright), only code
+*.mp3
+*.flac
+*.ogg
+*.opus
+*.wav
+*.m4a
+*.m4b
