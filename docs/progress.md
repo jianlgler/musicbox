@@ -26,8 +26,8 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
 | 1 | `jobs` table (migration `0002`) and queue design: `SKIP LOCKED`, leases, retries, fencing ([database.md](database.md#jobs)) | done |
 | 2 | `internal/storage`: S3 client in Go (AWS SDK), dependency vetting, `govulncheck` ([security.md](security.md#go-modules)) | done |
 | 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check ([api.md](api.md#post-apiv1tracks-upload-a-track)) | done |
-| 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown | next |
-| 5 | Tag parsing and cover art; fuzz testing the parser | to do |
+| 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown ([database.md](database.md#how-the-queue-is-used), [security.md](security.md#ingest-worker-cmdworker)) | done |
+| 5 | Tag parsing and cover art; fuzz testing the parser | next |
 | 6 | Library endpoints: artists, albums, search | to do |
 | 7 | Integration tests against real Postgres and SeaweedFS | to do |
 | 8 | Docs and commit | to do |
@@ -52,9 +52,13 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
   across two systems that can't share a transaction, `INSERT … ON CONFLICT DO NOTHING RETURNING`
   and concurrent duplicates under Read Committed, 201 vs 200 for idempotent creates.
 
-**Step 4 must handle:** the claim query reclaims an expired `running` job without checking
-`attempts < max_attempts`, so a worker that keeps crashing on a job's last attempt would loop
-forever. A job reclaimed past its limit must be marked `failed` instead of run.
+- **Step 4:** a worker loop (claim, run, record), leases vs job timeouts (timeout < lease, or
+  two workers run one job), fencing in every update, permanent vs transient errors (wrapping
+  with a type, `errors.As`), exponential backoff with jitter, the reclaim-past-the-limit gap,
+  graceful shutdown (`signal.NotifyContext`, `context.WithoutCancel`, a second signal forces),
+  `recover()` so one input can't crash the worker, verifying content-addressed objects
+  (`io.TeeReader`, `io.LimitReader`), Postgres `text` rejecting invalid UTF-8 and NUL, testing a
+  loop with a fake that cancels the context when drained, why Go can't kill a goroutine.
 
 ## What each step taught (Week 1)
 
@@ -134,9 +138,32 @@ Mutation check: removing the read limit, the early `Content-Length` check or the
 cleanup; trusting the client's `Content-Type`; re-uploading existing objects; answering 201 for
 duplicates; ignoring a storage error; creating the row after a failed Put. All 8 made a test fail.
 
+Worker (`internal/jobs` 71%: the queue SQL needs Postgres; `internal/ingest` 94.1%):
+
+| Test | Checks |
+| --- | --- |
+| `TestNewWorkerRejectsTimeoutLongerThanLease` | timeout ≥ lease refused at startup |
+| `TestBackoff` | 30 s, 1 m, 2 m, 4 m…, capped at 1 h, no overflow at attempt 1000 |
+| `TestSuccessCompletes`, `TestTransientErrorRetriesWithBackoff` | done → Complete; transient on attempt 2 → Retry after 1 m to 1 m 12 s (jitter) |
+| `TestLastAttemptFails`, `TestPermanentErrorFailsAtOnce` | attempt 5/5 → Fail; permanent on attempt 1 → Fail, no retry |
+| `TestReclaimedPastLimitFailsWithoutRunning` | attempt 6/5 → Fail, **handler never runs** |
+| `TestPanicFailsJobAndWorkerContinues` | a panic fails that job; **the next job still runs** |
+| `TestJobGetsATimeout` | the handler's context has a deadline within `JobTimeout` |
+| `TestLeaseLostDoesNotStopTheWorker` | `ErrLeaseLost` is not a worker error: no pause, next job claimed at once |
+| `TestClaimErrorIsRetried` | database down at claim time → worker keeps trying, job done when it's back |
+| `TestGracefulShutdown` | shutdown mid-job: **the job's context isn't cancelled**, its result is recorded, no new job claimed |
+| `TestCleanError` | invalid UTF-8 replaced, NUL removed, cut at 1000 bytes without splitting a character |
+| `TestHandle` (`internal/ingest`) | intact → ok; missing, replaced, truncated, larger, not audio, track deleted → **permanent**; database down, storage down, connection drop mid-read → **transient** |
+
+Mutation check: 11 deliberate bugs (no past-limit check, no `recover`, shutdown cancelling the
+job, never giving up, retrying permanent errors, timeout allowed past the lease, lost lease as
+an error, linear backoff, hash not checked, missing object retried, storage outage failing
+tracks). 10 failed a test at once; the lost-lease one survived because a 1 ms poll hid the
+pause, and the test now uses a 1-hour poll so the pause shows up as a timeout.
+
 Not covered yet: the SQL in `internal/tracks` (including `Create`'s transaction and duplicate
-handling), the migration runner, and `internal/storage` against real SeaweedFS (need
-integration tests, Step 7).
+handling) and `internal/jobs/queue.go`, the migration runner, and `internal/storage` against
+real SeaweedFS (need integration tests, Step 7; all were checked by hand, see below).
 
 ## Verified behavior
 
@@ -167,3 +194,20 @@ Week 2, checked on 2026-11-15 against real Postgres and SeaweedFS:
   downloaded with the AWS CLI, they're byte-identical.
 - HTML → 415, empty body → 400, 201 MiB chunked → 413. No `/tmp/musicbox-upload-*` file remains.
 - 10 identical uploads of a new file at the same moment: one 201, nine 200, one track, one job.
+
+Worker, checked on 2026-11-15:
+
+- The 3 queued jobs from Step 3: all `done` on attempt 1, tracks `ready`. `SIGTERM` stops it.
+- Worker refuses to start when storage is down (fail fast, like the API).
+- Object overwritten in storage with 4 changed bytes: job `failed` with "hashes to …", track
+  `failed`, no further retries.
+- Job set to `running`, attempt 5/5, lease expired (a crashed worker): failed on attempt 6/5
+  without running, track `failed`.
+- Storage stopped while the worker runs: jobs rescheduled 33 s later (30 s + jitter) with the
+  error stored, tracks still `pending`. Storage back: the intact one `done` on attempt 2.
+- 20 uploads, 3 workers started together: 7 + 7 + 6 jobs, all 20 `done` on attempt 1, none twice.
+- Fencing, with a temporary test against Postgres: a valid lease can't be claimed twice; after
+  the lease expires, another claim takes the job at attempt 2; the old owner's Complete gets
+  `ErrLeaseLost` and the new owner's `failed` stays, for both job and track.
+- Retry for 90 s: `run_at` 90 s ahead and not claimable before; an error with `\xff` and a NUL
+  byte stored as "bad � bytes".

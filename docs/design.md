@@ -52,7 +52,7 @@ There's no anonymous role: every request except `/healthz` and `/readyz` will re
 client → GET /api/v1/tracks?limit=N → validate → SELECT … ORDER BY created_at DESC, id LIMIT N → JSON
 ```
 
-### Adding a track (upload built; worker planned)
+### Adding a track (upload and worker built; tag parsing planned)
 
 ```
 1. upload or musicctl import
@@ -171,7 +171,7 @@ STRIDE is a checklist of six threat types. Status: ✅ in place, 🔜 planned.
 | | Slowloris connections | `ReadHeaderTimeout: 5s` | ✅ |
 | | Uploading enormous or endless files | Upload size limit and read deadline ✅; per-member quota 🔜 | partly ✅ |
 | | One member flooding the API | Rate limiting per member | 🔜 |
-| | Crafted audio crashing the ingest worker | Worker isolated from the API; per-job timeouts; failures marked `failed`, not retried forever | 🔜 |
+| | Crafted audio crashing the ingest worker | Worker is a separate process from the API; panics recovered and the job failed; per-job timeout shorter than the lease; failures marked `failed`, not retried forever; reads bounded by the expected size | ✅ (parser sandboxing 🔜) |
 | **E**levation of privilege | A member doing owner actions | Role checks on owner-only endpoints | 🔜 |
 | | A compromised API managing storage | S3 identity limited to Read/Write/List on one bucket; no Admin | ✅ |
 | | SQL injection dropping tables | Parameterized queries ✅; separate migrator and app database roles 🔜 | partly ✅ |

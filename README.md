@@ -29,6 +29,11 @@ go run ./cmd/api
 curl -i localhost:8080/readyz
 curl -i 'localhost:8080/api/v1/tracks?limit=10'
 curl -i --data-binary @song.flac localhost:8080/api/v1/tracks   # upload
+
+# 6. In another terminal: the ingest worker (start the API first, it runs the migrations).
+#    Run several to process jobs in parallel. Ctrl-C finishes the current job, then stops.
+set -a; . ./.env; set +a
+go run ./cmd/worker
 ```
 
 Both containers restart on their own when Docker starts (`restart: unless-stopped`).
@@ -47,7 +52,7 @@ The HTTP layer is tested with fakes for the database (see [docs/progress.md](doc
 ## Layout
 
 ```
-cmd/api/main.go                  wiring: config, pool, migrations, HTTP server
+cmd/api/main.go                  API wiring: config, pool, storage, migrations, HTTP server
 internal/httpapi/server.go       HTTP layer: routes, handlers, validation, JSON
 internal/httpapi/middleware.go   rules for every request: logging, security headers
 internal/httpapi/server_test.go  HTTP layer tests (fakes, no database)
@@ -55,6 +60,9 @@ internal/tracks/tracks.go        data layer: Track type, SQL queries
 internal/httpapi/upload.go       POST /api/v1/tracks: size limit, type check, hashing, store, enqueue
 internal/storage/storage.go      object storage layer: S3 client (Put, Get, Exists, Delete, Ping)
 internal/audio/sniff.go          recognises audio formats from their first bytes
+cmd/worker/main.go               ingest worker: wiring, signals
+internal/jobs/                   job queue SQL and the worker loop (retries, backoff, shutdown)
+internal/ingest/ingest.go        what an ingest job does: verify the stored object
 internal/db/migrate.go           migration runner (embedded SQL, advisory lock)
 internal/db/migrations/*.sql     schema changes, applied in filename order
 compose.yaml                     local Postgres and SeaweedFS (images pinned by digest)

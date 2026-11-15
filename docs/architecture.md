@@ -29,9 +29,23 @@
 
 ## What exists today
 
-The API service, Postgres, and SeaweedFS (S3 object storage, bucket `musicbox`). The API
-stores uploads in SeaweedFS (`POST /api/v1/tracks`) and enqueues an ingest job for each new
-track; the worker that runs those jobs is next.
+The API service, the ingest worker, Postgres, and SeaweedFS (S3 object storage, bucket
+`musicbox`). The API stores uploads in SeaweedFS (`POST /api/v1/tracks`) and enqueues an ingest
+job for each new track. The worker (`cmd/worker`) claims those jobs, verifies each stored object
+(size, SHA-256, audio header) and marks the track `ready` or `failed`. Tag parsing comes next.
+
+### Worker layers
+
+```
+cmd/worker/main.go          wiring   config, pool, storage, signals
+internal/jobs/worker.go     loop     claim → run with timeout → complete / retry / fail; graceful shutdown
+internal/jobs/queue.go      data     queue SQL: claim (SKIP LOCKED), fenced updates
+internal/ingest/ingest.go   work     what one ingest job does; permanent vs transient errors
+```
+
+Shutdown: `SIGINT`/`SIGTERM` stops claiming new jobs. The running job isn't interrupted
+(`context.WithoutCancel`), and its result is recorded. A second signal kills the process at once.
+The worker runs no migrations: the API owns the schema.
 
 ## Layers inside the API
 

@@ -47,6 +47,27 @@ a directory on disk when running for real.
 The upload is still unauthenticated, like every route: the API is reachable only from this
 machine until authentication arrives. A per-member quota and rate limit come with it.
 
+### Ingest worker (`cmd/worker`)
+
+The worker handles untrusted bytes (anyone with an account can upload), so it's built to fail
+one job, never the whole worker:
+
+| Measure | Against |
+| --- | --- |
+| Separate process from the API | A crash or memory blow-up in parsing can't take the API down |
+| `recover()` around each job: a panic fails that job (permanent), the worker carries on | A crafted file that crashes a parser stopping ingest for everyone |
+| Per-job timeout (4 min) shorter than the lease (5 min), checked at startup | A hung job, and two workers running the same job |
+| A job reclaimed after its last attempt is failed without running | A file that crashes the worker being retried forever |
+| Reads at most the expected size + 1 byte from storage | An object replaced by something huge making the worker read forever |
+| SHA-256 and size of the stored object checked against the row | Corrupted or tampered objects being marked `ready` |
+| Error text cleaned before storing (UTF-8, NUL, 1000 bytes) and logged with `%q` | Bytes from a file breaking the `UPDATE` (stuck job) or forging log lines |
+| Fenced updates (`attempts`) | A slow worker overwriting the result of the worker that took over |
+
+Limits: Go can't kill a goroutine, so the timeout only works if the handler checks its `ctx`. A
+parser stuck in a loop that ignores it keeps a CPU busy until the process is restarted. Real
+sandboxing (a separate short-lived process per file, with CPU and memory limits) is planned
+for when tag parsing arrives.
+
 ### Error handling
 
 - Clients get generic error messages (`internal error`, `unavailable`). Database errors can

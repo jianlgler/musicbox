@@ -97,14 +97,28 @@ WHERE id = $1 AND attempts = $2   -- $2 = the attempt number this worker claimed
 If the lease expired and another worker reclaimed the job, `attempts` has moved on, the update
 matches 0 rows, and the slow worker knows it lost the job. `attempts` acts as a **fencing token**.
 
-**Fail:** retry with exponential backoff by setting `status = 'queued'` and
-`run_at = now() + delay` (30 s, 1 min, 2 min, 4 min); after `max_attempts`, set
-`status = 'failed'` and the track's status to `failed`, keeping a truncated `last_error`.
+**Retry** (a transient error, like storage being down): `status = 'queued'`,
+`run_at = now() + delay` with exponential backoff (30 s, 1 min, 2 min, 4 min, capped at 1 h)
+plus up to 20% random jitter, so jobs that failed together don't all retry at the same instant.
+
+**Fail** (a permanent error, like a corrupt file, or the last attempt): `status = 'failed'` and
+the track's status to `failed`. Both keep a cleaned `last_error`: at most 1000 bytes, invalid
+UTF-8 replaced and NUL bytes removed, because Postgres `text` rejects both and the update would
+fail, leaving the job stuck.
+
+Complete, Retry and Fail are all fenced (`WHERE id = $1 AND attempts = $2 AND status = 'running'`)
+and update the job and its track in one transaction, so a stale worker changes neither.
+
+**Reclaimed past the limit:** the claim query also picks up expired `running` jobs without
+checking `attempts`. If a worker crashed during the last attempt, the reclaim makes `attempts`
+exceed `max_attempts`; the worker then marks the job `failed` without running it
+("lease expired during the last attempt"). Otherwise a file that crashes every worker would be
+retried forever. Implemented in `internal/jobs`.
 
 **Delivery is at-least-once.** A worker can finish the work and crash before marking the job
 done; the lease expires and the job runs again. So every job must be **idempotent**: running it
-twice must give the same result as running it once. Ingest is: it sets the same tag values and
-writes the cover to the same key (`covers/<sha256>`).
+twice must give the same result as running it once. Ingest is: today it only reads and verifies;
+from Step 5 it sets the same tag values and writes the cover to the same key (`covers/<sha256>`).
 
 ### `schema_migrations`
 

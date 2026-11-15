@@ -108,3 +108,25 @@ func (s *Store) Create(ctx context.Context, sha256 string, size int64) (t Track,
 	}
 	return t, true, nil
 }
+
+// ErrNotFound is returned when no track has the given id
+var ErrNotFound = errors.New("track not found")
+
+// File identifies a track's stored bytes. Internal only: never sent to clients.
+type File struct {
+	SHA256 string
+	Size   int64
+}
+
+// File returns what the ingest worker needs to find and verify a track's object
+func (s *Store) File(ctx context.Context, trackID string) (File, error) {
+	var f File
+	err := s.pool.QueryRow(ctx, `SELECT sha256, size_bytes FROM tracks WHERE id = $1`, trackID).Scan(&f.SHA256, &f.Size)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return File{}, ErrNotFound
+	}
+	if err != nil {
+		return File{}, fmt.Errorf("[TRACKS] select file of %s: %w", trackID, err)
+	}
+	return f, nil
+}
