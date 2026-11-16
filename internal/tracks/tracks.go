@@ -12,13 +12,19 @@ import (
 )
 
 type Track struct {
-	ID        string    `json:"id"`
-	Title     *string   `json:"title"`  // NULL until the ingest worker reads the tags
-	Artist    *string   `json:"artist"` // *string: nil becomes JSON null
-	Album     *string   `json:"album"`
-	Status    string    `json:"status"`
-	SizeBytes int64     `json:"size_bytes"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string    `json:"id"`
+	Title       *string   `json:"title"`  // NULL until the ingest worker reads the tags
+	Artist      *string   `json:"artist"` // *string: nil becomes JSON null
+	Album       *string   `json:"album"`
+	AlbumArtist *string   `json:"album_artist"`
+	TrackNumber *int      `json:"track_number"`
+	DiscNumber  *int      `json:"disc_number"`
+	Year        *int      `json:"year"`
+	DurationMS  *int64    `json:"duration_ms"`
+	HasCover    bool      `json:"has_cover"` // the cover's hash stays internal, like the file's
+	Status      string    `json:"status"`
+	SizeBytes   int64     `json:"size_bytes"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // Store is a type (not plain functions) so the HTTP layer can swap in a fake in tests
@@ -59,10 +65,12 @@ func (s *Store) List(ctx context.Context, limit int) ([]Track, error) {
 }
 
 // Same columns, same order, for every query that returns a Track
-const trackColumns = `id, title, artist, album, status, size_bytes, created_at`
+const trackColumns = `id, title, artist, album, album_artist, track_number, disc_number, year,
+	duration_ms, cover_sha256 IS NOT NULL, status, size_bytes, created_at`
 
 func scanTrack(row pgx.Row, t *Track) error {
-	return row.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.Status, &t.SizeBytes, &t.CreatedAt)
+	return row.Scan(&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumArtist, &t.TrackNumber, &t.DiscNumber,
+		&t.Year, &t.DurationMS, &t.HasCover, &t.Status, &t.SizeBytes, &t.CreatedAt)
 }
 
 // Create records an uploaded file whose bytes are already in storage, and enqueues its ingest job.
@@ -129,4 +137,30 @@ func (s *Store) File(ctx context.Context, trackID string) (File, error) {
 		return File{}, fmt.Errorf("[TRACKS] select file of %s: %w", trackID, err)
 	}
 	return f, nil
+}
+
+// Metadata is what the ingest worker read from a track's file. nil fields are stored as NULL.
+type Metadata struct {
+	Title, Artist, Album, AlbumArtist *string
+	TrackNumber, DiscNumber, Year     *int
+	DurationMS                        int64
+	CoverSHA256                       *string // object covers/<hash>, already stored
+}
+
+// SetMetadata replaces the track's metadata with m. It's a plain overwrite with the same values
+// every time the same file is parsed, so it's safe for an ingest job that runs twice.
+func (s *Store) SetMetadata(ctx context.Context, trackID string, m Metadata) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE tracks
+		SET title = $2, artist = $3, album = $4, album_artist = $5,
+		    track_number = $6, disc_number = $7, year = $8, duration_ms = $9, cover_sha256 = $10
+		WHERE id = $1`,
+		trackID, m.Title, m.Artist, m.Album, m.AlbumArtist, m.TrackNumber, m.DiscNumber, m.Year, m.DurationMS, m.CoverSHA256)
+	if err != nil {
+		return fmt.Errorf("[TRACKS] set metadata of %s: %w", trackID, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

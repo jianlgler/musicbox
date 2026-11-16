@@ -27,8 +27,8 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
 | 2 | `internal/storage`: S3 client in Go (AWS SDK), dependency vetting, `govulncheck` ([security.md](security.md#go-modules)) | done |
 | 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check ([api.md](api.md#post-apiv1tracks-upload-a-track)) | done |
 | 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown ([database.md](database.md#how-the-queue-is-used), [security.md](security.md#ingest-worker-cmdworker)) | done |
-| 5 | Tag parsing and cover art; fuzz testing the parser | next |
-| 6 | Library endpoints: artists, albums, search | to do |
+| 5 | Tag parsing and cover art; fuzz testing the parser ([security.md](security.md#parsing-tags-internalprobe)) | done |
+| 6 | Library endpoints: artists, albums, search | next |
 | 7 | Integration tests against real Postgres and SeaweedFS | to do |
 | 8 | Docs and commit | to do |
 
@@ -59,6 +59,14 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
   `recover()` so one input can't crash the worker, verifying content-addressed objects
   (`io.TeeReader`, `io.LimitReader`), Postgres `text` rejecting invalid UTF-8 and NUL, testing a
   loop with a fake that cancels the context when drained, why Go can't kill a goroutine.
+- **Step 5:** choosing a parser (maintenance, formats, licence, supply chain), verifying a
+  binary blob with build attestations and reproducible builds, WebAssembly as a sandbox
+  (wazero, directory mounts), process isolation (re-executing your own binary, empty
+  environment, `exec.CommandContext` kill, `Pdeathsig`, `WaitDelay`), output limits and the
+  `io.Copy`/`ReaderFrom` trap with embedded types, cleaning untrusted text (UTF-8, control,
+  bidi and zero-width characters), parsing numbers without overflow, decompression bombs and
+  `image.DecodeConfig`, global decoder registration, content-addressed covers, Go fuzzing
+  (`testing.F`, seed corpus, coverage guidance and its blind spot for WASM), equivalent mutants.
 
 ## What each step taught (Week 1)
 
@@ -161,8 +169,35 @@ an error, linear backoff, hash not checked, missing object retried, storage outa
 tracks). 10 failed a test at once; the lost-lease one survived because a 1 ms poll hid the
 pause, and the test now uses a 1-hour poll so the pause shows up as a timeout.
 
-Not covered yet: the SQL in `internal/tracks` (including `Create`'s transaction and duplicate
-handling) and `internal/jobs/queue.go`, the migration runner, and `internal/storage` against
+Tag parsing (`internal/probe` 86%, `internal/ingest` 89.5%). Fixtures in
+`internal/probe/testdata` are 0.25 s sine tones made with ffmpeg (FLAC, MP3, Ogg, M4A, WAV;
+50 KB in total):
+
+| Test | Checks |
+| --- | --- |
+| `TestReadFixtures`, `TestReadCover`, `TestReadNoTags` | tags from FLAC, MP3, Ogg and M4A; JPEG covers from FLAC and MP3; untagged files give `nil` fields but a duration |
+| `TestReadUnreadable` | empty, HTML, FLAC magic + zeros → `ErrUnreadable` |
+| `TestText` | NUL, ESC, invalid UTF-8, right-to-left override, zero-width space removed; whitespace collapsed; multi-valued joined; 500-character cut on a character boundary; real Unicode kept |
+| `TestNumber`, `TestDuration` | `"3/12"`, `"2024-05-01"`, leading zeros, 5000 zeros + 7; out of range and 20-digit values → `nil`; impossible durations → 0 |
+| `TestCover` | small PNG kept; 100000×100000 header (bomb), GIF **with its decoder registered**, SVG, broken PNG, > 10 MiB rejected |
+| `TestIsolated*` | real fixture through the child; unreadable; **hung child killed** at the deadline; crash reported with the panic line; 20 MiB flood rejected **because of the limit**; a bad cover from the child re-checked; **the child's environment has no `DATABASE_URL`, `S3_*` or `HOME`** |
+| `TestLimitedBuffer*` | no `ReadFrom`; `io.Copy` of 1000 bytes into a 10-byte buffer keeps 10 and reports overflow |
+| `TestHandle*` (`internal/ingest`) | metadata and cover saved; the parser gets the verified bytes, **alone in their directory**; cover stored once per image; a rejected cover doesn't fail the track; parser unreadable/timeout/crash → permanent, can't-start → transient; **bytes that fail verification are never parsed**; no temp files left |
+
+Fuzzing, 2026-11-16: `FuzzRead` 60 s (110,562 files through TagLib), `FuzzText` 30 s (797,647),
+`FuzzNumber` 30 s (1,899,139). No failures.
+
+Mutation check: 12 bugs at first, 7 caught. The 5 survivors: (1) the output-flood test passed
+for the wrong reason, (2) no test had the child return a bad cover, (3) removing
+`ToValidUTF8` was an **equivalent mutant** (ranging over a string already yields U+FFFD, so the
+line was deleted), (4) the image-type allowlist was hidden by which decoders happened to be
+registered (the test now registers GIF), (5) a clumsy 9-digit cutoff (rewritten). Fixing (1)
+exposed a **real bug**: the output limit was bypassed through `ReadFrom` (see
+[security.md](security.md#parsing-tags-internalprobe)). After the fixes, all 5 plus the
+`ReadFrom` regression are caught.
+
+Not covered yet: the SQL in `internal/tracks` (including `Create`'s transaction, duplicate
+handling and `SetMetadata`) and `internal/jobs/queue.go`, the migration runner, and `internal/storage` against
 real SeaweedFS (need integration tests, Step 7; all were checked by hand, see below).
 
 ## Verified behavior
@@ -211,3 +246,17 @@ Worker, checked on 2026-11-15:
   `ErrLeaseLost` and the new owner's `failed` stays, for both job and track.
 - Retry for 90 s: `run_at` 90 s ahead and not claimable before; an error with `\xff` and a NUL
   byte stored as "bad � bytes".
+
+Tag parsing, checked on 2026-11-16:
+
+- Migration `0003` applied on API start.
+- The 5 fixtures, two "album" tracks sharing a cover, and a file with hostile tags: all 8 jobs
+  `done` on attempt 1 in under a second, each file parsed in its own child process.
+- Tags, track/disc numbers, year and durations stored; the FLAC and MP3 fixtures (same image)
+  share one cover object, so do the two album tracks: 2 objects under `covers/` for 8 tracks.
+- Hostile title `evil\u202Egpj.exe\nFAKE LOG LINE\e[31m` stored as
+  `evilgpj.exe FAKE LOG LINE[31m`; artist `"  lots   of   space  "` as `lots of space`;
+  track `99999999999` and year `0001` as `NULL`.
+- The API shows the new fields and `has_cover`, never a hash.
+- No child process left running (checked through `/proc/*/exe`) and no temp directory left.
+

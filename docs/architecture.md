@@ -32,7 +32,8 @@
 The API service, the ingest worker, Postgres, and SeaweedFS (S3 object storage, bucket
 `musicbox`). The API stores uploads in SeaweedFS (`POST /api/v1/tracks`) and enqueues an ingest
 job for each new track. The worker (`cmd/worker`) claims those jobs, verifies each stored object
-(size, SHA-256, audio header) and marks the track `ready` or `failed`. Tag parsing comes next.
+(size, SHA-256, audio header), reads tags and cover art in a sandboxed child process, stores
+the cover under `covers/<sha256>`, and marks the track `ready` or `failed`.
 
 ### Worker layers
 
@@ -41,6 +42,8 @@ cmd/worker/main.go          wiring   config, pool, storage, signals
 internal/jobs/worker.go     loop     claim → run with timeout → complete / retry / fail; graceful shutdown
 internal/jobs/queue.go      data     queue SQL: claim (SKIP LOCKED), fenced updates
 internal/ingest/ingest.go   work     what one ingest job does; permanent vs transient errors
+internal/probe/isolated.go  sandbox  runs the parser in a child process: empty env, timeout kill
+internal/probe/probe.go     parse    TagLib (WebAssembly) + cleaning every value from the file
 ```
 
 Shutdown: `SIGINT`/`SIGTERM` stops claiming new jobs. The running job isn't interrupted

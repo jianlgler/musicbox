@@ -15,7 +15,12 @@ One row per audio file.
 | `sha256` | `text` | `NOT NULL`, `UNIQUE`, must match `^[0-9a-f]{64}$` | Content hash; the object's name in storage. `UNIQUE` makes re-imports harmless and gives a fast "do we have this file?" lookup |
 | `size_bytes` | `bigint` | `NOT NULL`, `> 0` | `bigint` because `integer` stops at ~2.1 GB |
 | `status` | `text` | `NOT NULL`, default `'pending'`, one of `pending`/`ready`/`failed` | Set by the ingest worker |
-| `title`, `artist`, `album` | `text` | nullable | `NULL` until the ingest worker reads the tags |
+| `title`, `artist`, `album`, `album_artist` | `text` | nullable, ≤ 500 characters (`tracks_text_lengths`) | From the file's tags (migration `0003`). `NULL` until the worker reads them, or if the tag is missing. Cleaned first: valid UTF-8, no control or bidi characters |
+| `track_number` | `integer` | nullable, 1–9999 | `"3/12"` is stored as 3 |
+| `disc_number` | `integer` | nullable, 1–999 | |
+| `year` | `integer` | nullable, 1000–9999 | The leading year of the date tag (`"2024-05-01"` → 2024) |
+| `duration_ms` | `integer` | nullable, `>= 0` | From the audio properties; 0 if the file claims an impossible length |
+| `cover_sha256` | `text` | nullable, `^[0-9a-f]{64}$` | The cover's object is `covers/<cover_sha256>`. An album's tracks share one image, stored once. Not exposed by the API (it says `has_cover`) |
 | `created_at` | `timestamptz` | `NOT NULL`, default `now()` | Stored in UTC, shown in the session's time zone |
 
 `now()` returns the start time of the *transaction*, so rows inserted by one statement share

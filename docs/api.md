@@ -57,6 +57,12 @@ Newest first (`created_at DESC`, ties broken by `id`).
       "title": "First",            string or null (null until tags are read)
       "artist": "Someone",         string or null
       "album": null,               string or null
+      "album_artist": null,        string or null
+      "track_number": 3,           integer or null
+      "disc_number": null,         integer or null
+      "year": 2024,                integer or null
+      "duration_ms": 215000,       integer or null (null until the worker has run)
+      "has_cover": true,           whether the file has usable cover art (served from Step 6)
       "status": "pending",         "pending" | "ready" | "failed"
       "size_bytes": 1000,
       "created_at": "2026-10-25T11:32:04.445222+01:00"
@@ -96,7 +102,7 @@ curl -i --data-binary @song.flac localhost:8080/api/v1/tracks
   worker checks the whole file and can still mark the track `failed`.
 - **Duplicates** are recognised by the SHA-256 the server computes from the bytes. Uploading the
   same file again returns the existing track with 200.
-- The track starts as `pending`. Title, artist and album stay `null` until the ingest worker
+- The track starts as `pending`. The tag fields stay `null` until the ingest worker
   reads the tags.
 - Not yet: `GET /api/v1/tracks/{id}` (so there's no `Location` header), and recording who uploaded
   the track (comes with authentication).

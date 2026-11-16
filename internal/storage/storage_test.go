@@ -96,6 +96,12 @@ func TestAudioKey(t *testing.T) {
 		if key, err := storage.AudioKey(in); err == nil {
 			t.Errorf("AudioKey(%q) = %q, want an error", in, key)
 		}
+		if key, err := storage.CoverKey(in); err == nil {
+			t.Errorf("CoverKey(%q) = %q, want an error", in, key)
+		}
+	}
+	if key, err := storage.CoverKey(testHash); err != nil || key != "covers/"+testHash {
+		t.Errorf("CoverKey(valid) = %q, %v", key, err)
 	}
 }
 

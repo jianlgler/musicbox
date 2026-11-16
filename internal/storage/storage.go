@@ -78,6 +78,15 @@ func AudioKey(sha256 string) (string, error) {
 	return "audio/" + sha256, nil
 }
 
+// CoverKey is AudioKey for cover art: covers/<sha256 of the image bytes>. An album's tracks
+// usually embed the same image, so it's stored once.
+func CoverKey(sha256 string) (string, error) {
+	if !sha256Hex.MatchString(sha256) {
+		return "", fmt.Errorf("[STORAGE] not a lowercase hex SHA-256: %q", sha256)
+	}
+	return "covers/" + sha256, nil
+}
+
 // Put stores size bytes from body under key. Objects are never modified in place, only
 // replaced whole. size must be exact: S3 needs Content-Length up front for a streamed body.
 func (s *Store) Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error {

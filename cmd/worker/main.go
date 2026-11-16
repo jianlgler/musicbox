@@ -13,11 +13,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jianlgler/musicbox/internal/ingest"
 	"github.com/jianlgler/musicbox/internal/jobs"
+	"github.com/jianlgler/musicbox/internal/probe"
 	"github.com/jianlgler/musicbox/internal/storage"
 	"github.com/jianlgler/musicbox/internal/tracks"
 )
 
 func main() {
+	// The same binary is the probe child: the worker re-runs itself to parse each file in a
+	// separate process (see internal/probe). Checked first, before reading any config or secret.
+	if len(os.Args) > 1 && os.Args[1] == probe.ChildArg {
+		os.Exit(probe.ChildMain(os.Args[2:]))
+	}
+
 	// SIGINT (Ctrl-C) or SIGTERM (docker stop, systemd) cancels ctx: the graceful shutdown signal
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -52,7 +59,13 @@ func main() {
 		log.Fatalf("[STORAGE] connect to object storage: %v", err)
 	}
 
-	w, err := jobs.NewWorker(jobs.NewQueue(pool), ingest.NewHandler(tracks.NewStore(pool), objects), jobs.Config{})
+	self, err := os.Executable()
+	if err != nil {
+		log.Fatalf("[CONFIG] find own executable: %v", err)
+	}
+	prober := probe.Isolated{Executable: self, Timeout: probe.DefaultTimeout, TempDir: os.TempDir()}
+
+	w, err := jobs.NewWorker(jobs.NewQueue(pool), ingest.NewHandler(tracks.NewStore(pool), objects, prober), jobs.Config{})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -68,7 +81,7 @@ func main() {
 	}()
 
 	log.Printf("[WORKER] started")
-	w.Run(ctx) // returns once ctx is cancelled and the current job is recorded
+	w.Run(ctx)  // returns once ctx is cancelled and the current job is recorded
 	<-announced // otherwise main can return, and the process exit, before the message is printed
 	log.Printf("[WORKER] stopped")
 }

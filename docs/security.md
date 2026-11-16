@@ -63,10 +63,45 @@ one job, never the whole worker:
 | Error text cleaned before storing (UTF-8, NUL, 1000 bytes) and logged with `%q` | Bytes from a file breaking the `UPDATE` (stuck job) or forging log lines |
 | Fenced updates (`attempts`) | A slow worker overwriting the result of the worker that took over |
 
-Limits: Go can't kill a goroutine, so the timeout only works if the handler checks its `ctx`. A
-parser stuck in a loop that ignores it keeps a CPU busy until the process is restarted. Real
-sandboxing (a separate short-lived process per file, with CPU and memory limits) is planned
-for when tag parsing arrives.
+#### Parsing tags (`internal/probe`)
+
+Tag parsing is the riskiest code in the project: a mature but large C++ library reading bytes
+chosen by any member. It's contained in three layers:
+
+```
+worker process ──spawns──▶ child process (same binary, "__probe-child <file>")
+                             └─ wazero sandbox ──▶ TagLib compiled to WebAssembly
+                                  sees only the file's directory, read-only
+```
+
+| Measure | Against |
+| --- | --- |
+| TagLib runs as WebAssembly in `wazero`: memory bugs stay inside the WASM instance's own memory; no syscalls except reading one mounted directory | A buffer overflow in the C++ parser becoming code execution in the worker |
+| Each file in its own `0700` temp directory | The sandbox mounts the whole directory: other files would be readable |
+| A child process per file, killed (SIGKILL) after 30 s | A file that hangs the parser (WASM can't be cancelled, and Go can't kill a goroutine) |
+| The child gets an **empty environment** (only `TMPDIR`, `GOMEMLIMIT`, `GOMAXPROCS`) | A compromised parser reading `DATABASE_URL` or the S3 keys |
+| `Pdeathsig: SIGKILL` | Orphaned parsers when the worker dies |
+| Child output capped at 16 MiB, stderr at 4 KiB | A child flooding the worker's memory |
+| The child's cover is checked again by the parent | Trusting the child more than the file it parsed |
+| Unreadable, hung or crashed → permanent failure | The same bytes hanging a worker 5 times |
+| Text: valid UTF-8; control, zero-width and bidi characters removed; whitespace collapsed; ≤ 500 characters; database `CHECK` too | Log forging, terminal escapes, `"evil\u202Egpj.exe"` displaying as `evilexe.jpg`, Postgres rejecting the row |
+| Numbers parsed by hand, stopping as soon as they pass the maximum; ranges also in the database | Overflow; years like 0001 |
+| Covers: type from the magic bytes (JPEG, PNG only), ≤ 10 MiB, `DecodeConfig` checks dimensions ≤ 8000 px before anything decodes pixels | Decompression bombs; SVG or HTML "covers" served to browsers later |
+
+**A bug that testing caught:** `limitedBuffer` first embedded `bytes.Buffer`, which silently
+added `bytes.Buffer`'s `ReadFrom` method. `os/exec` drains the child's output with `io.Copy`,
+which calls `ReadFrom` when the destination has one, so the 16 MiB limit was never applied. A
+stricter test (checking *why* a flooding child failed) exposed it. `limitedBuffer` now holds the
+buffer as a named field, and a test fails if it ever implements `io.ReaderFrom` again.
+
+**Limits:**
+- Memory: `GOMEMLIMIT=256MiB` is a soft target, not a hard cap. `RLIMIT_AS` doesn't suit Go or
+  wazero (both reserve large virtual address ranges). A hard limit needs a cgroup, which comes
+  with running the worker as a container or systemd service.
+- Go's fuzzer only sees coverage in Go code, so `FuzzRead` can't steer into TagLib's internals:
+  for TagLib it's random testing. The sandbox, not the fuzzing, is the main protection.
+- Text is cleaned, not escaped: clients must still escape it when rendering (React does by
+  default).
 
 ### Error handling
 
@@ -166,6 +201,29 @@ Deliberately **not** used: `aws-sdk-go-v2/config` and `aws-sdk-go-v2/credentials
 pulls in SSO, STS and EC2 metadata clients and silently reads `~/.aws` and `AWS_*` variables.
 The client is built with `s3.New(s3.Options{...})`, so every setting is explicit in
 `internal/storage`, and fewer modules means less code to trust.
+
+Vetting done on 2026-11-16 for tag parsing (cutoff 2026-11-02):
+
+| Module | Version | Published | Why |
+| --- | --- | --- | --- |
+| `go.senan.xyz/taglib` | v0.15.0 | 2026-10-12 | TagLib 2.1.1 compiled to WebAssembly; maintained; LGPL-2.1 (obligations only when distributing binaries) |
+| `github.com/tetratelabs/wazero` | v1.11.1-0.20260428013916-2bbd517b7633 | 2026-04-28 | Pure-Go WebAssembly runtime (no cgo). An untagged commit, but the one taglib is built and tested with |
+| `golang.org/x/sys` | v0.44.0 (wazero asks for v0.43.0) | 2026-04-23 | Required by wazero. Raised to v0.44.0: `govulncheck` reported GO-2026-5024 in v0.43.0, Windows-only and not called by this code, but the fix was free |
+
+Rejected: `github.com/dhowden/tag` (pure Go, BSD, but untouched since April 2024 with no tagged
+release, no WAV, and two 2014–2017 modules pulled in).
+
+**The bundled `taglib.wasm` (388 KB) is a binary blob, so it was verified:** the module's
+`repro.yaml` workflow rebuilds it from source on every tag, fails if the result differs, and
+publishes a signed build attestation. Checked with:
+
+```sh
+gh attestation verify taglib.wasm --repo sentriz/go-taglib --format json \
+  --jq '.[].verificationResult.signature.certificate | {buildSignerURI, sourceRepositoryRef}'
+```
+
+Result: digest `7cc788ae…8225d3`, built by `repro.yaml@refs/tags/v0.15.0` from commit
+`30044ec9`. The bytes in the Go module are the bytes that CI rebuilt from that tag.
 
 #### Known vulnerabilities: `govulncheck`
 

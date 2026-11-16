@@ -10,3 +10,6 @@
 *.wav
 *.m4a
 *.m4b
+
+# Exception: tiny generated test tones (no music) used as parser fixtures
+!internal/probe/testdata/*

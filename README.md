@@ -45,6 +45,11 @@ To work with the stored files from the command line, see [docs/seaweedfs.md](doc
 go test ./...                 # no Docker or database needed
 go test -race -cover ./...    # also check for data races, show coverage
 go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...   # known vulnerabilities in reachable code
+
+# Fuzzing (not part of go test ./...; each runs until stopped or -fuzztime)
+go test ./internal/probe -run '^$' -fuzz '^FuzzRead$'   -fuzztime 60s   # random files through TagLib
+go test ./internal/probe -run '^$' -fuzz '^FuzzText$'   -fuzztime 30s   # tag text cleaning
+go test ./internal/probe -run '^$' -fuzz '^FuzzNumber$' -fuzztime 30s   # track/disc/year parsing
 ```
 
 The HTTP layer is tested with fakes for the database (see [docs/progress.md](docs/progress.md#automated-tests)).
@@ -62,7 +67,9 @@ internal/storage/storage.go      object storage layer: S3 client (Put, Get, Exis
 internal/audio/sniff.go          recognises audio formats from their first bytes
 cmd/worker/main.go               ingest worker: wiring, signals
 internal/jobs/                   job queue SQL and the worker loop (retries, backoff, shutdown)
-internal/ingest/ingest.go        what an ingest job does: verify the stored object
+internal/ingest/ingest.go        what an ingest job does: verify, parse, store cover, save tags
+internal/probe/                  tag parsing (TagLib in WebAssembly) in a sandboxed child process
+internal/probe/testdata/         tiny generated test tones (no music), the only audio in git
 internal/db/migrate.go           migration runner (embedded SQL, advisory lock)
 internal/db/migrations/*.sql     schema changes, applied in filename order
 compose.yaml                     local Postgres and SeaweedFS (images pinned by digest)
