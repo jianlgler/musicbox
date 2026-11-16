@@ -28,8 +28,8 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
 | 3 | `POST /api/v1/tracks`: streaming upload, size limit, hashing, file-type check ([api.md](api.md#post-apiv1tracks-upload-a-track)) | done |
 | 4 | `cmd/worker`: claim, process, retry with backoff, graceful shutdown ([database.md](database.md#how-the-queue-is-used), [security.md](security.md#ingest-worker-cmdworker)) | done |
 | 5 | Tag parsing and cover art; fuzz testing the parser ([security.md](security.md#parsing-tags-internalprobe)) | done |
-| 6 | Library endpoints: artists, albums, search | next |
-| 7 | Integration tests against real Postgres and SeaweedFS | to do |
+| 6 | Library endpoints: one track, cover art, artists, albums, search ([api.md](api.md#library-artists-albums-search)) | done |
+| 7 | Integration tests against real Postgres and SeaweedFS | next |
 | 8 | Docs and commit | to do |
 
 ### What Week 2 taught
@@ -67,6 +67,14 @@ Upload a file, store it in SeaweedFS, and let a worker read its tags and cover a
   bidi and zero-width characters), parsing numbers without overflow, decompression bombs and
   `image.DecodeConfig`, global decoder registration, content-addressed covers, Go fuzzing
   (`testing.F`, seed corpus, coverage guidance and its blind spot for WASM), equivalent mutants.
+- **Step 6:** deriving entities (artists, albums) from tags with `GROUP BY` instead of tables,
+  choosing an identity (album artist + title, `coalesce`), `array_agg … FILTER … [1]`, `NULLS
+  LAST`, one query for a list and its detail so the numbers can't drift, Go generics for a
+  shared scan loop (`collect[T]`), LIKE wildcards in user input and `ESCAPE`, why `%x%` can't use
+  a B-tree (and when `pg_trgm` would be worth it), validating before the database (malformed
+  UUID, NUL, invalid UTF-8 → 400/404 instead of 500), path values vs query parameters for names,
+  serving binary data (type from the bytes, per-response `Cache-Control`, `private`), HEAD for
+  free from `ServeMux`.
 
 ## What each step taught (Week 1)
 
@@ -196,7 +204,27 @@ exposed a **real bug**: the output limit was bypassed through `ReadFrom` (see
 [security.md](security.md#parsing-tags-internalprobe)). After the fixes, all 5 plus the
 `ReadFrom` regression are caught.
 
-Not covered yet: the SQL in `internal/tracks` (including `Create`'s transaction, duplicate
+Library endpoints (`internal/httpapi/library_test.go`, package coverage 95.2%):
+
+| Test | Checks |
+| --- | --- |
+| `TestGetTrack` | found (also uppercase hex); unknown → 404; database down → 500; `hello`, 35 characters, a moved or replaced hyphen, non-hex, `' OR 1=1--` → 404 **without reaching the data layer** |
+| `TestTrackCover` | JPEG and PNG served byte for byte with the type **from the bytes**; `Cache-Control: private, max-age=86400`; `nosniff` still set; the hash not in any header |
+| `TestTrackCoverErrors` | not a UUID, unknown track, no cover → 404; database down, bad hash in the row, object missing, storage down → 500; **an object that is HTML or empty is never served** (500); errors stay JSON and `no-store` |
+| `TestArtistsAndAlbums`, `TestAlbumTracks`, `TestSearch` | JSON shapes; names percent-decoded and trimmed (`AC/DC & Co`); no `artist` = all albums; unknown album → 404; `100% pure` passed through as typed |
+| `TestLibraryBadParameters` | 15 bad requests (missing, blank, too long, repeated, NUL, invalid UTF-8, bad limit) → 400 with the exact message, **data layer never called** |
+| `TestLibraryNameAtLimit` | a 500-character name (1000 bytes) is accepted: the limit counts characters |
+| `TestLibraryEmpty`, `TestLibraryDatabaseError` | `[]` passed through; every endpoint answers 500 with a generic body |
+| `TestEscapeLike` (`internal/tracks`) | `%`, `_` and `\` escaped, backslash first |
+
+Mutation check: 13 bugs in `library.go` (skipping the UUID check, its hyphen or hex part;
+allowing NUL or invalid UTF-8; no trim; counting bytes; accepting repeats; ignoring required;
+serving an unrecognised type; keeping `no-store`; PNG labelled JPEG; "no cover" as a 500). 12
+caught at once; the hyphen one survived, because the only test with a misplaced hyphen also broke
+the hex check. A test with hyphens replaced by `x` now catches it.
+
+Not covered yet: the SQL in `internal/tracks` (including the library queries and the
+`EscapeLike` call in `Search`, both checked by hand below) (including `Create`'s transaction, duplicate
 handling and `SetMetadata`) and `internal/jobs/queue.go`, the migration runner, and `internal/storage` against
 real SeaweedFS (need integration tests, Step 7; all were checked by hand, see below).
 
@@ -259,4 +287,17 @@ Tag parsing, checked on 2026-11-16:
   track `99999999999` and year `0001` as `NULL`.
 - The API shows the new fields and `has_cover`, never a hash.
 - No child process left running (checked through `/proc/*/exe`) and no temp directory left.
+
+Library endpoints, checked on 2026-11-16 against the tracks above:
+
+- Artists: 3, alphabetical ignoring case; "Various" (album artist of a compilation track by
+  "The Sines") has 1 album and 4 tracks; "lots of space" has 0 albums.
+- Albums: "Same Art" (2 tracks) and "Waveforms" (4 tracks, 2024), each with a `cover_track_id`;
+  `?artist=Various` returns only "Waveforms". Album tracks in track-number order; an unknown
+  album → 404.
+- Cover: `image/jpeg`, `private, max-age=86400`, and the bytes hash to the row's
+  `cover_sha256`. HEAD works. A track without a cover and an unknown id → 404 JSON.
+- Search: `tone` and `SINES` find the tracks; `%`, `_` and `' OR 1=1--` find nothing; `%00` and
+  `%FF` → 400, logged as `"\x00"` and `"\xff"`. In Postgres, the escaped pattern matches a
+  literal `100% pure` and not `abc`.
 

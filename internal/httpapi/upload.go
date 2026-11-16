@@ -31,14 +31,15 @@ type TrackCreator interface {
 	Create(ctx context.Context, sha256 string, size int64) (tracks.Track, bool, error)
 }
 
-// ObjectStore is what the upload handler needs from object storage. *storage.Store satisfies it.
+// ObjectStore is what the upload and cover handlers need from object storage. *storage.Store satisfies it.
 type ObjectStore interface {
 	Exists(ctx context.Context, key string) (bool, error)
 	Put(ctx context.Context, key string, body io.Reader, size int64, contentType string) error
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 }
 
 // Upload a track: POST /api/v1/tracks with the raw audio file as the body.
-//
+// The handler for the server's /api/v1/tracks route
 // Order matters, because storage and Postgres can't share a transaction:
 // hash → store the object → insert the row and its job. A crash in between leaves at worst an
 // orphan object (cleanable), never a row pointing at audio that doesn't exist.
@@ -88,10 +89,10 @@ func (s *Server) handleUploadTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
-		_ = tmp.Close()
+		_ = tmp.Close()           // Cleaning up the temp file is best-effort
 		_ = os.Remove(tmp.Name()) // Never keep a copy of the upload around
 	}()
-
+	// Hash can only be computed while reading the bytes, so we copy to both the temp file and the hash at once
 	hash := sha256.New()
 	disk := &errRecorder{w: tmp}
 	size, err := io.Copy(io.MultiWriter(disk, hash), io.MultiReader(bytes.NewReader(head), body))

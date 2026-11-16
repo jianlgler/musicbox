@@ -47,21 +47,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]Track, error) {
 	if err != nil {
 		return nil, fmt.Errorf("[TRACKS] query tracks: %w", err)
 	}
-	defer rows.Close() // Gives the connection back to the pool
-
-	result := []Track{} // Not a nil slice: an empty list must encode as [], not null
-	for rows.Next() {
-		var t Track
-		if err := scanTrack(rows, &t); err != nil {
-			return nil, fmt.Errorf("[TRACKS] scan track: %w", err)
-		}
-		result = append(result, t)
-	}
-	// rows.Next() also returns false when iteration fails midway, only rows.Err() tells them apart
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("[TRACKS] iterate tracks: %w", err)
-	}
-	return result, nil
+	return collect(rows, "tracks", scanTrack) // closes rows, checks rows.Err()
 }
 
 // Same columns, same order, for every query that returns a Track
@@ -73,7 +59,7 @@ func scanTrack(row pgx.Row, t *Track) error {
 		&t.Year, &t.DurationMS, &t.HasCover, &t.Status, &t.SizeBytes, &t.CreatedAt)
 }
 
-// Create records an uploaded file whose bytes are already in storage, and enqueues its ingest job.
+// Create records for an uploaded file whose bytes are already in storage, and enqueues its ingest job
 // If a track with this sha256 exists, it returns that track with created=false and enqueues nothing:
 // uploading the same file twice is harmless. The caller is responsible for computing sha256
 // from the bytes itself, never taking it from the client.

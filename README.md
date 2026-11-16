@@ -29,6 +29,7 @@ go run ./cmd/api
 curl -i localhost:8080/readyz
 curl -i 'localhost:8080/api/v1/tracks?limit=10'
 curl -i --data-binary @song.flac localhost:8080/api/v1/tracks   # upload
+curl -s 'localhost:8080/api/v1/albums'                         # library (also /artists, /search?q=)
 
 # 6. In another terminal: the ingest worker (start the API first, it runs the migrations).
 #    Run several to process jobs in parallel. Ctrl-C finishes the current job, then stops.
@@ -63,6 +64,8 @@ internal/httpapi/middleware.go   rules for every request: logging, security head
 internal/httpapi/server_test.go  HTTP layer tests (fakes, no database)
 internal/tracks/tracks.go        data layer: Track type, SQL queries
 internal/httpapi/upload.go       POST /api/v1/tracks: size limit, type check, hashing, store, enqueue
+internal/httpapi/library.go      one track, cover art, artists, albums, search
+internal/tracks/library.go       library SQL: artists and albums derived from tags, search
 internal/storage/storage.go      object storage layer: S3 client (Put, Get, Exists, Delete, Ping)
 internal/audio/sniff.go          recognises audio formats from their first bytes
 cmd/worker/main.go               ingest worker: wiring, signals

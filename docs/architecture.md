@@ -33,7 +33,8 @@ The API service, the ingest worker, Postgres, and SeaweedFS (S3 object storage, 
 `musicbox`). The API stores uploads in SeaweedFS (`POST /api/v1/tracks`) and enqueues an ingest
 job for each new track. The worker (`cmd/worker`) claims those jobs, verifies each stored object
 (size, SHA-256, audio header), reads tags and cover art in a sandboxed child process, stores
-the cover under `covers/<sha256>`, and marks the track `ready` or `failed`.
+the cover under `covers/<sha256>`, and marks the track `ready` or `failed`. The API then serves
+the library: tracks, covers, artists and albums (derived from tags), and search.
 
 ### Worker layers
 
@@ -55,8 +56,11 @@ The worker runs no migrations: the API owns the schema.
 ```
 cmd/api/main.go                wiring   builds everything, starts the server
 internal/httpapi/middleware.go policy   rules applied to ALL requests
-internal/httpapi/server.go     HTTP     logic for EACH endpoint
-internal/tracks/tracks.go      data     SQL
+internal/httpapi/server.go     HTTP     routes, health, track list
+internal/httpapi/upload.go     HTTP     upload
+internal/httpapi/library.go    HTTP     one track, cover, artists, albums, search; parameter checks
+internal/tracks/tracks.go      data     SQL for tracks
+internal/tracks/library.go     data     SQL for the library: artists and albums derived from tags
 internal/db/migrate.go         schema   brings the database up to date at startup
 ```
 

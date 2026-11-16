@@ -5,10 +5,8 @@ package httpapi // Consumer
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/jianlgler/musicbox/internal/tracks"
@@ -34,6 +32,8 @@ type TrackLister interface {
 type TrackStore interface {
 	TrackLister
 	TrackCreator
+	TrackReader
+	Library
 }
 
 type Server struct {
@@ -51,6 +51,12 @@ func New(db Pinger, tracks TrackStore, objects ObjectStore) *Server {
 	s.mux.HandleFunc("GET /readyz", s.handleReadyz)
 	s.mux.HandleFunc("GET /api/v1/tracks", s.handleListTracks)
 	s.mux.HandleFunc("POST /api/v1/tracks", s.handleUploadTrack)
+	s.mux.HandleFunc("GET /api/v1/tracks/{id}", s.handleGetTrack)
+	s.mux.HandleFunc("GET /api/v1/tracks/{id}/cover", s.handleTrackCover)
+	s.mux.HandleFunc("GET /api/v1/artists", s.handleArtists)
+	s.mux.HandleFunc("GET /api/v1/albums", s.handleAlbums)
+	s.mux.HandleFunc("GET /api/v1/albums/tracks", s.handleAlbumTracks)
+	s.mux.HandleFunc("GET /api/v1/search", s.handleSearch)
 
 	// Outermost runs first and finishes last: logging sees the final status and the full duration.
 	// Wrapped here and not in main, so tests through New cover the middleware too.
@@ -85,18 +91,9 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 // List tracks, newest first: GET /api/v1/tracks?limit=N
 func (s *Server) handleListTracks(w http.ResponseWriter, r *http.Request) {
-	limit := defaultLimit
-	if q := r.URL.Query().Get("limit"); q != "" {
-		n, err := strconv.Atoi(q)
-		if err != nil || n < 1 || n > maxLimit {
-			// %q quotes and escapes the input, so a "\n" in it can't forge an extra log line
-			log.Printf("[BAD_REQUEST] %s %q - invalid limit %q", r.Method, r.URL.Path, q)
-			writeJSON(w, r, http.StatusBadRequest, map[string]string{
-				"error": fmt.Sprintf("limit must be an integer between 1 and %d", maxLimit),
-			})
-			return
-		}
-		limit = n
+	limit, ok := parseLimit(w, r)
+	if !ok {
+		return
 	}
 
 	// r.Context() is cancelled if the client disconnects, so the query stops too

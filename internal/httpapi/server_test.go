@@ -3,6 +3,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/jianlgler/musicbox/internal/httpapi"
+	"github.com/jianlgler/musicbox/internal/storage"
 	"github.com/jianlgler/musicbox/internal/tracks"
 )
 
@@ -34,6 +36,52 @@ type fakeTracks struct {
 	createCalls int
 	gotSHA256   string
 	gotSize     int64
+
+	// Get, CoverHash
+	track     tracks.Track
+	coverHash string
+	getErr    error
+	gotID     string
+
+	// Library
+	artists   []tracks.Artist
+	albums    []tracks.Album
+	album     tracks.Album
+	libErr    error
+	libCalls  int
+	gotArtist string
+	gotAlbum  string
+	gotQuery  string
+}
+
+func (f *fakeTracks) Get(_ context.Context, id string) (tracks.Track, error) {
+	f.gotID = id
+	return f.track, f.getErr
+}
+
+func (f *fakeTracks) CoverHash(_ context.Context, id string) (string, error) {
+	f.gotID = id
+	return f.coverHash, f.getErr
+}
+
+func (f *fakeTracks) Artists(_ context.Context, limit int) ([]tracks.Artist, error) {
+	f.libCalls, f.gotLimit = f.libCalls+1, limit
+	return f.artists, f.libErr
+}
+
+func (f *fakeTracks) Albums(_ context.Context, artist string, limit int) ([]tracks.Album, error) {
+	f.libCalls, f.gotArtist, f.gotLimit = f.libCalls+1, artist, limit
+	return f.albums, f.libErr
+}
+
+func (f *fakeTracks) AlbumTracks(_ context.Context, artist, title string) (tracks.Album, []tracks.Track, error) {
+	f.libCalls, f.gotArtist, f.gotAlbum = f.libCalls+1, artist, title
+	return f.album, f.list, f.libErr
+}
+
+func (f *fakeTracks) Search(_ context.Context, query string, limit int) ([]tracks.Track, error) {
+	f.libCalls, f.gotQuery, f.gotLimit = f.libCalls+1, query, limit
+	return f.list, f.libErr
 }
 
 func (f *fakeTracks) List(_ context.Context, limit int) ([]tracks.Track, error) {
@@ -56,7 +104,19 @@ type fakeObjects struct {
 	types     map[string]string
 	existsErr error
 	putErr    error
+	getErr    error
 	puts      int
+}
+
+func (f *fakeObjects) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	b, ok := f.objects[key]
+	if !ok {
+		return nil, storage.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
 func (f *fakeObjects) Exists(_ context.Context, key string) (bool, error) {

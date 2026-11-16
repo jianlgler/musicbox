@@ -28,6 +28,28 @@ once the server is shared, authenticated users are not automatically trusted.
 - SQL values always go in as parameters (`$1`), never formatted into the query string.
 - The database enforces its own rules (`CHECK`, `UNIQUE`, `NOT NULL`), so bad data is rejected
   even if application code has a bug.
+- **Checked before Postgres sees it**, so a bad request is a 400 or 404 and not a 500 (and
+  never a database error in the logs that anyone can trigger at will): path ids must be
+  canonical UUIDs; text parameters must be valid UTF-8 without NUL (the query string is
+  percent-decoded to raw bytes, so `%00` and `%FF` arrive as such), bounded in characters, and
+  given once (`?q=a&q=b` is refused rather than silently picking one).
+- **LIKE wildcards in search are escaped** (`tracks.EscapeLike`). Parameters stop SQL injection,
+  but not pattern injection: inside the pattern, a user's `%` would still mean "anything".
+
+### Cover art (`GET /api/v1/tracks/{id}/cover`)
+
+The one endpoint that returns bytes an uploader chose, to a browser.
+
+- The `Content-Type` comes from the bytes **on every request** (JPEG or PNG magic), not from the
+  type stored next to the object. Anything else is a 500 and nothing is sent: served as
+  `text/html`, an "image" could be a stored XSS. `nosniff` stops the browser guessing.
+- The object key comes from the database row, re-validated by `storage.CoverKey` (64 hex): a
+  tampered row can't point the server at `../audio/…` or another object.
+- `Cache-Control: private, max-age=86400` replaces the global `no-store` for this response only
+  (a cover never changes). `private`: browsers may keep it, shared proxies may not.
+- The cover's hash is never sent (no `ETag` from it), like the audio hash.
+- No authorization yet: anyone who can reach the API can fetch any cover by track id. That
+  arrives with authentication (see [Planned](#planned)).
 
 ### Uploads (`POST /api/v1/tracks`)
 
@@ -41,8 +63,22 @@ once the server is shared, authenticated users are not automatically trusted.
 | Temp file always deleted, on success and on every error path (tested) | Copies of uploads piling up on disk |
 | Raw body, not `multipart/form-data` | One less parser handling untrusted input |
 
-`/tmp` is RAM-backed (tmpfs) on Fedora, so concurrent large uploads use memory. Set `TMPDIR` to
-a directory on disk when running for real.
+**Known limitation: temp files and concurrent uploads.** Every upload in progress holds a full
+temp file (the SHA-256, and so the object key, is only known after the last byte), and nothing
+caps how many uploads run at once. The temp file goes in `$TMPDIR`, default `/tmp`, which on
+Fedora is tmpfs, backed by RAM. Ten simultaneous 200 MiB uploads would use about **2 GB of
+memory**; more would push the machine into swap or the OOM killer. The comment in
+`internal/httpapi/upload.go` says the same.
+
+- **Now:** set `TMPDIR` to a directory on disk when running for real (then it's disk space, not
+  RAM, but still unbounded).
+- **Fix, before untrusted clients can reach the API:** cap concurrent uploads, for example a
+  semaphore around the handler (a buffered channel of size N; when it's full, answer 503 with
+  `Retry-After` instead of queueing), so the worst case is N × 200 MiB. Per-member quotas and
+  rate limits (with authentication) cap it per person; the semaphore caps it in total.
+
+The ingest worker's temp file (`os.MkdirTemp` in `internal/ingest`) has the same tmpfs issue,
+but it's already bounded: one file at a time per worker process.
 
 The upload is still unauthenticated, like every route: the API is reachable only from this
 machine until authentication arrives. A per-member quota and rate limit come with it.
@@ -137,6 +173,8 @@ Set on every response by `securityHeaders` middleware:
 | `Cache-Control` | `no-store` | Browsers or proxies keeping copies of private data |
 | `Referrer-Policy` | `no-referrer` | URLs (and tokens in them) leaking to other sites |
 | `Content-Security-Policy` | `frame-ancestors 'none'` | Clickjacking through frames |
+
+Cover images override `Cache-Control` (see [Cover art](#cover-art-get-apiv1tracksidcover)).
 
 ### Object storage (SeaweedFS)
 
@@ -256,6 +294,8 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 `internal/httpapi/server_test.go` includes negative assertions, so a regression fails `go test`:
 invalid input never reaches the data layer, 500 responses don't leak internal error text,
 `sha256` isn't exposed, and all security headers are present on 200, 404 and 405 responses.
+`library_test.go` adds: malformed UUIDs, NUL and invalid UTF-8 never reach the data layer, and
+a cover object that isn't a JPEG or PNG is never served.
 
 `internal/storage/storage_test.go` checks that requests are SigV4-signed with the access key,
 that the secret key never appears in a header, URL, body or error, that `AudioKey` rejects
@@ -269,6 +309,7 @@ traversal and non-hex input, and that a 403 is never mistaken for "object missin
 | **Authorization on every object** (`WHERE id = $1 AND owner_id = $2`, return 404) to prevent IDOR/BOLA. UUIDs alone are not access control | with playlists |
 | Separate Postgres roles: migrator (owns schema) vs app (rows only), so SQL injection can't drop tables | later |
 | `Strict-Transport-Security` and `sslmode=require` | when TLS arrives (AWS) |
+| **Cap concurrent uploads** (semaphore around the upload handler, 503 when full) and `TMPDIR` on disk, so temp files can't exhaust RAM on tmpfs (see [Uploads](#uploads-post-apiv1tracks)) | before the API faces untrusted clients |
 | Panic-recovery, rate-limiting, request-ID middleware | hardening / observability weeks |
 | `gosec`, `govulncheck`, image scanning in CI | CI weeks |
 | Structured logging (`log/slog`, JSON) | observability weeks |
